@@ -1,0 +1,1555 @@
+---
+title: "Libya - Conflict Actor Analysis"
+author: "CDA"
+date: "5/10/2022"
+output: html_document
+---
+
+
+```{r setup, echo=FALSE, warning=FALSE, message = FALSE, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(readstata13)
+library(tidyverse)
+library(xlsx)
+library(RColorBrewer)
+library(ggstatsplot)
+library(sjPlot)
+library(psych)
+library(broom)
+library(timeSeries)
+library(data.table)
+library(ggplot2)
+library(sjmisc)
+library(expss) 
+library(lubridate)
+library(scales)
+library(corrplot)
+library(MASS)
+library(reshape2)
+library(ggridges)
+library(grid)
+library(ggrepel)
+library(countrycode)
+library(WDI)
+library(ggthemes)
+library(directlabels)
+library(fuzzyjoin)
+library(vtable)
+library(haven)
+library(lme4)
+library(brms)
+library(acled.api)
+library(tseries)
+library(sf)
+library(xts)
+library(GGally)
+library(MLmetrics)
+library(pROC)
+
+library(glmnet)
+library(caret)
+library(Metrics)
+library(yardstick)
+library(gbm)
+library(nnet)
+library(themis)
+library(randomForest)
+
+require(tidymodels)
+require(tidyposterior)
+require(tsibble)  #tsibble for time series based on tidy principles
+require(fable)  #for forecasting based on tidy principles
+require(ggfortify)  #for plotting timeseries
+require(forecast)  #for forecast function
+library(fpp2)
+require(chron)
+require(zoo)
+require(lmtest)
+require(TTR)  #for smoothing the time series
+```
+
+
+```{r acled_api, echo=FALSE, warning=FALSE, message = FALSE}
+libya_conflict <- acled.api( # stores an ACLED sample in object my.data.frame
+  email.address = "jamie_parr@dai.com",
+  access.key = "q9ByJkq9*sNQS8NkJNL0",
+  country = c("Libya"), 
+  all.variables = TRUE,
+  start.date = "1997-01-01", 
+  end.date = Sys.Date())
+
+
+libya_conflict$year = lubridate::year(libya_conflict$event_date)
+libya_conflict$yday = yday(libya_conflict$event_date)
+libya_conflict$quarter = quarter(libya_conflict$event_date)
+libya_conflict$month = lubridate::month(libya_conflict$event_date)
+libya_conflict$day = lubridate::day(libya_conflict$event_date)
+
+```
+
+
+
+```{r timeSeries, echo=FALSE, warning=FALSE, message = FALSE}
+
+lib_daily_mun <- 
+  libya_conflict %>%
+  dplyr::group_by(admin2, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date)
+
+lib_daily_mun <-
+  lib_daily_mun %>%
+  mutate(event_date = as.Date(event_date))
+
+lib_daily <-  
+lib_daily_mun %>%
+  dplyr::select(-contains("admin2")) %>%
+  group_by(date = event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  dplyr::mutate(date = as.Date(date), 
+                fatalities =ifelse(is.na(fatalities), 0, fatalities))
+
+lib_daily %>%  
+  ggplot(., aes(x = date, y = fatalities))  +
+  geom_line()+
+  xlab("Year") +
+  ylab("Fatalities")
+
+autoplot(ts(diff(lib_daily$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Day") +
+  ggtitle("Day to Day Change in Fatalities")
+  
+lib_agg_monthly <-
+libya_conflict %>%
+  dplyr::select(-admin2) %>%
+  group_by(year, month) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(date = as.yearmon(paste(year, month), "%Y %m")) %>%
+  dplyr::select(-year, -month) %>%
+  as.data.frame()
+
+# as.POSIXct(d, format = '%Y-%m-%d') 
+# lib_agg <- xts(lib_agg$fatalities, lib_agg$date)
+
+# lib_agg <- ts(lib_agg$fatalities, start = min(lib_agg$date), end = max(lib_agg$date), frequency = 1)
+
+lib_agg_year <- 
+  lib_daily %>%
+  dplyr::mutate(year = lubridate::year(date)) %>%
+  dplyr::group_by(year) %>%
+  summarize(fatalities = sum(fatalities, na.rm = T))
+
+lib_agg_monthly_cut <- lib_agg_monthly %>%
+  dplyr::filter(date > "Dec 2017")
+
+ggseasonplot(ts(lib_agg_monthly_cut$fatalities, frequency = 12, start = c(2018, 1), end = c(2022, 4)), year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("Fatalities") +
+  ggtitle("Libya: Fatalities by Month")
+
+
+
+autoplot(ts(diff(lib_agg_monthly$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Months") +
+  ggtitle("Month to Month Change in Fatalities")
+
+
+lib_d7 <- 
+  lib_daily %>%
+  dplyr::mutate(wday = wday(as.Date(date)),
+                year = year(date)) %>%
+  dplyr::group_by(wday, year) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T))
+
+ggplot(lib_d7, aes(x = wday, y = fatalities, color = factor(year))) +
+  geom_line() +
+  ylab("Fatalities") +
+  xlab("Day of Week") +
+  labs(color = "Year") +
+  ggtitle("Libya: Fatalities by Day of Week")
+
+lib_agg_year_mun <- 
+  libya_conflict %>%
+  dplyr::group_by(admin2) %>%
+  dplyr::mutate(index = cur_group_id()) %>%
+  dplyr::mutate(year = year(event_date),
+                fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::group_by(year, admin2) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) 
+
+ggplot(lib_agg_year_mun, aes(x = year, y = fatalities, color = admin2)) +
+  geom_line() +
+#  theme(legend.position = 'none') +
+  ggtitle("Yearly Trend in Fatalities by Muhafazat")
+
+ggAcf(ts(lib_d7$fatalities, frequency = 4, start = c(1997, 1), end = c(2022, 1) ))
+ggAcf(ts(lib_agg_monthly$fatalities, frequency = 12, start = 1997, end = 2022))
+
+
+libya_conflict %>%
+  dplyr::group_by(admin1, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = admin1)) +
+  geom_line() +
+  facet_wrap(. ~ admin1) +
+  theme(legend.position = "none")
+
+
+libya_conflict %>%
+  dplyr::group_by(admin2, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::filter(!is.na(admin2)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = admin2)) +
+  geom_line() +
+  facet_wrap(. ~ admin2) +
+  theme(legend.position = "none")
+
+
+
+
+auto.arima(ts(lib_agg_monthly$fatalities, frequency = 181))
+auto.arima(ts(lib_agg_monthly$fatalities, frequency = 181), trace = T)
+auto.arima(ts(lib_agg_monthly$fatalities, frequency = 181), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+mon_fat_arima = arima(ts(lib_agg_monthly$fatalities, frequency = 181), order = c(1,0,1))
+mon_fat_arima
+
+tail(ts(lib_agg_monthly$fatalities, frequency = 181))
+residuals(mon_fat_arima)
+
+arimafore <- forecast(mon_fat_arima, h = 12)
+autoplot(arimafore)
+
+
+auto.arima(ts(diff(lib_daily$fatalities), frequency = 3197))
+auto.arima(ts(diff(lib_daily$fatalities), frequency = 3197), trace = T)
+auto.arima(ts(diff(lib_daily$fatalities), frequency = 3197), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+daily_fat_arima = arima(ts(diff(lib_daily$fatalities), frequency = 3197), order = c(0,0,4))
+daily_fat_arima
+
+tail(ts(diff(lib_daily$fatalities), frequency = 1572))
+residuals(daily_fat_arima)
+
+arimafore <- forecast(daily_fat_arima, h = 365)
+autoplot(arimafore)
+
+
+plot(forecast( ets(lib_daily$fatalities), h = 365))
+
+
+
+```
+
+
+```{r desc_actors, echo=FALSE, warning=FALSE, message = FALSE}
+
+
+libya_conflict %>% 
+  dplyr::count(actor1) %>%
+  dplyr::arrange(desc(n))
+
+libya_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(actor1) %>%
+  dplyr::arrange(desc(n))
+
+libya_conflict %>% 
+  dplyr::count(actor2) %>%
+  dplyr::arrange(desc(n))
+
+libya_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(actor2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+libya_conflict %>% 
+  dplyr::count(assoc_actor_1) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+libya_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(assoc_actor_1) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+libya_conflict %>% 
+  dplyr::count(assoc_actor_2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+libya_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(assoc_actor_2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+libya_conflict <-
+libya_conflict %>%
+  dplyr::mutate(haftar_faction = ifelse(actor1 == "Military Forces of Libya (2014-) Haftar Faction"|actor2 == "Military Forces of Libya (2014-) Haftar Faction"|actor1 == "Military Forces of Libya (2014-) Haftar Faction - Saiqa Forces"|actor2 == "Military Forces of Libya (2014-) Haftar Faction - Saiqa Forces", 1, 0),
+                uag  = ifelse(actor1 == "Unidentified Armed Group (Libya)"|actor2 == "Unidentified Armed Group (Libya)", 1, 0),
+                aas  = ifelse(actor1 == "Ansar al-Sharia"|actor2 == "Ansar al-Sharia", 1, 0),
+                brsc  = ifelse(actor1 == "BRSC: Shura Council of Benghazi Revolutionaries"|actor2 == "BRSC: Shura Council of Benghazi Revolutionaries", 1, 0),
+                aas  = ifelse(actor1 == "Ansar al-Sharia"|actor2 == "Ansar al-Sharia", 1, 0),
+                # BRSC: Shura Council of Benghazi Revolutionaries
+                scdm  = ifelse(actor1 == "Shura Council of Darnah Mujahidin"|actor2 == "Shura Council of Darnah Mujahidin", 1, 0),
+                nat_accord = ifelse(actor1 == "Military Forces of Libya (2016-2021) Government of National Accord"|actor2 == "Military Forces of Libya (2016-2021) Government of National Accord", 1, 0),
+                isis = ifelse(actor1 == "Islamic State (Libya)"|actor2 == "Islamic State (Libya)", 1, 0),
+                zintan = ifelse(actor1 == "Zintan Ethnic Militia (Libya)"|actor2 == "Zintan Ethnic Militia (Libya)", 1 , 0))
+                
+
+# Haftar Faction
+libya_conflict %>%
+  dplyr::filter(haftar_faction == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::count() %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(n = ifelse(is.na(n), 0, n)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = n)) +
+  geom_line()
+
+libya_conflict %>%
+  dplyr::filter(haftar_faction == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = fatalities)) +
+  geom_line()
+
+libya_conflict %>% st_drop_geometry %>%
+   dplyr::filter(haftar_faction == 1 & aas == 1) %>%
+   mutate(event_date = as.Date(event_date)) %>%
+   dplyr::group_by(event_date, admin1) %>%
+   dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+   ungroup() %>%
+   tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+   dplyr::filter(!is.na(admin1)) %>%
+   dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+   ggplot(., aes(x = as.Date(event_date), y = fatalities, color = admin1)) +
+   geom_line() + xlab("Date") + ylab("Fatalities") + ggtitle("Number of Fatalities in Conflict Events Attributed to Haftar Faction and Ansar al-Sharia") + facet_grid(. ~ admin1)
+
+libya_conflict %>% st_drop_geometry %>%
+   dplyr::filter(haftar_faction == 1 & isis == 1) %>%
+   mutate(event_date = as.Date(event_date)) %>%
+   dplyr::group_by(event_date, admin1) %>%
+   dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+   ungroup() %>%
+   tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+   dplyr::filter(!is.na(admin1)) %>%
+   dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+   ggplot(., aes(x = as.Date(event_date), y = fatalities, color = admin1)) +
+   geom_line() + xlab("Date") + ylab("Fatalities") + ggtitle("Number of Fatalities in Conflict Events Attributed to Haftar Faction and Islamic State") + facet_grid(. ~ admin1)
+
+
+
+libya_conflict %>% st_drop_geometry %>%
+   dplyr::filter(haftar_faction == 1 & scdm == 1) %>%
+   mutate(event_date = as.Date(event_date)) %>%
+   dplyr::group_by(event_date, admin1) %>%
+   dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+   ungroup() %>%
+   tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+   dplyr::filter(!is.na(admin1)) %>%
+   dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+   ggplot(., aes(x = as.Date(event_date), y = fatalities, color = admin1)) +
+   geom_line() + xlab("Date") + ylab("Fatalities") + ggtitle("Number of Fatalities in Conflict Events\nAttributed to Haftar Faction and Shura Council of Darnah Mujahidin") + facet_grid(. ~ admin1)
+
+
+
+
+# National Accord
+libya_conflict %>%
+  dplyr::filter(nat_accord == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::count() %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(n = ifelse(is.na(n), 0, n)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = n)) +
+  geom_line()
+
+libya_conflict %>%
+  dplyr::filter(nat_accord == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = fatalities)) +
+  geom_line()
+
+# ISIS
+libya_conflict %>%
+  dplyr::filter(isis == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::count() %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(n = ifelse(is.na(n), 0, n)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = n)) +
+  geom_line()
+
+# ISIS
+libya_conflict %>%
+  dplyr::filter(isis == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = fatalities)) +
+  geom_line()
+
+
+# Zintan
+libya_conflict %>%
+  dplyr::filter(zintan == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::count() %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(n = ifelse(is.na(n), 0, n)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = n)) +
+  geom_line()
+
+# Zintan
+libya_conflict %>%
+  dplyr::filter(zintan == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = fatalities)) +
+  geom_line()
+
+# UAGs
+libya_conflict %>%
+  dplyr::filter(uag == 1) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::group_by(event_date) %>%
+  dplyr::count() %>% 
+  ungroup() %>%
+  tidyr::complete(event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  dplyr::mutate(n = ifelse(is.na(n), 0, n)) %>%
+  ggplot(., aes(x = as.Date(event_date), y = n)) +
+  geom_line()
+
+# interactions 
+
+libya_conflict %>% 
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n))
+
+# if needed install.packages("remotes")
+# remotes::install_github("jthomasmock/gtExtras")
+# 
+# library(gtExtras)
+# 
+# head(lp) %>%
+#   gt() %>% 
+#   gt_theme_538()
+
+
+
+
+```
+```{r models_prep, echo=FALSE, warning=FALSE, message = FALSE}
+libya_conflict <- st_as_sf(libya_conflict, coords = c("longitude", "latitude"))
+
+st_crs(libya_conflict) <- st_crs(lib_spatial)
+libya_conflict <- sf::st_intersection(libya_conflict, lib_spatial[,c("ADM2_EN", "dist", "r_tri", "nl", "ndvi")])
+
+```
+
+```{r models_haftar, echo=FALSE, warning=FALSE, message = FALSE}
+
+
+libya_agg_year_adm2 <- 
+  libya_conflict %>%
+  dplyr::group_by(year, ADM2_EN) %>%
+  summarize(haftar_faction = sum(haftar_faction, na.rm = T)) %>%
+  dplyr::mutate(haftar_faction_bin = ifelse(haftar_faction >= 1, 1, 0)) 
+
+
+libya_agg_year_adm2 <-
+  libya_agg_year_adm2 %>%
+  ungroup() %>%
+  tidyr::complete(ADM2_EN, year) %>%
+  dplyr::select(-geometry) 
+  
+libya_agg_year_adm2 <-
+libya_agg_year_adm2 %>%
+  left_join(lib_spatial[,c("ADM2_EN", "dist", "r_tri", "nl", "ndvi")])
+
+
+libya_agg_year_adm2$haftar_faction <- ifelse(is.na(libya_agg_year_adm2$haftar_faction), 0, libya_agg_year_adm2$haftar_faction)
+
+libya_agg_year_adm2$haftar_faction_bin <- ifelse(is.na(libya_agg_year_adm2$haftar_faction_bin), 0, libya_agg_year_adm2$haftar_faction_bin)
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2020", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year != "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+# full model only
+# save preds for the optimal tuning parameter
+# class probs in addition to preds
+haftar_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",   
+   classProbs = TRUE,  
+   summaryFunction = twoClassSummary
+   )
+
+formreg <- haftar_faction_bin ~ nl + ndvi + r_tri + dist
+
+# test on 2021
+
+train_libya_agg_year_adm2$haftar_faction_bin <- ifelse(train_libya_agg_year_adm2$haftar_faction_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$haftar_faction_bin <- ifelse(test_libya_agg_year_adm2$haftar_faction_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$haftar_faction_bin <- as.factor(as.character(train_libya_agg_year_adm2$haftar_faction_bin))
+test_libya_agg_year_adm2$haftar_faction_bin <- as.factor(as.character(test_libya_agg_year_adm2$haftar_faction_bin))
+
+lib_haftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = haftar_trControl
+)
+
+
+lib_haftar_gbm
+
+plot(lib_haftar_gbm)
+
+
+lib_haftar_preds <- bind_cols(
+   predict(lib_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$haftar_faction_bin
+)
+
+lib_haftar_preds
+
+confmat_haftar <- confusionMatrix(lib_haftar_preds$Predicted, reference = test_libya_agg_year_adm2$haftar_faction_bin)
+
+confmat_haftar
+
+
+lib_haftar_auc <- Metrics::auc(actual = lib_haftar_preds$Actual == "yes", lib_haftar_preds$yes)
+
+
+yardstick::roc_curve(lib_haftar_preds, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Predicted Presence of Haftar Faction - GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(lib_haftar_auc, 4))
+  )
+
+# non XBoost AUC - .7294
+
+yardstick::gain_curve(lib_haftar_preds, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality GBM Gain Curve")
+
+plot(caret::varImp(lib_haftar_gbm), main="Variable Importance with Gradient Boosting")
+
+
+# carry out on 2022
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2021", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year == "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+
+train_libya_agg_year_adm2$haftar_faction_bin <- ifelse(train_libya_agg_year_adm2$haftar_faction_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$haftar_faction_bin <- ifelse(test_libya_agg_year_adm2$haftar_faction_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$haftar_faction_bin <- as.factor(as.character(train_libya_agg_year_adm2$haftar_faction_bin))
+test_libya_agg_year_adm2$haftar_faction_bin <- as.factor(as.character(test_libya_agg_year_adm2$haftar_faction_bin))
+
+lib_haftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = haftar_trControl
+)
+
+
+lib_haftar_gbm
+
+plot(lib_haftar_gbm)
+
+
+lib_haftar_preds <- bind_cols(
+   predict(lib_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$haftar_faction_bin
+)
+
+lib_haftar_preds
+
+confmat_haftar <- confusionMatrix(lib_haftar_preds$Predicted, reference = test_libya_agg_year_adm2$haftar_faction_bin)
+
+confmat_haftar
+
+```
+
+```{r maps_haftar, echo=FALSE, warning=FALSE, message = FALSE}
+
+lib_haftar_preds$ADM2_EN <- test_libya_agg_year_adm2$ADM2_EN
+
+lp1 <- lib_spatial %>% dplyr::left_join(lib_haftar_preds)
+
+lp1map <- as(lp1, "Spatial")
+
+lp1map <- fortify(lp1map, region = "ADM2_EN")
+
+
+lp1map <- lp1map %>% dplyr::left_join(lp1, by = c("id" = "ADM2_EN"))
+
+pretty_breaks <- c(.20,.40,.60,.80)
+
+# find the extremes
+minVal <- min(lp1map$yes, na.rm = T)  
+maxVal <- max(lp1map$yes, na.rm = T)  
+# compute labels
+labels <- c()  
+brks <- c(minVal, pretty_breaks, maxVal)  
+# round the labels (actually, only the extremes)
+for(idx in 1:length(brks)){  
+  labels <- c(labels,round(brks[idx + 1], 2))
+}
+
+labels <- labels[1:length(labels)-1]  
+# define a new variable on the data with the breaks
+lp1map$brks <- cut(lp1map$yes,  
+                          breaks = brks, 
+                          include.lowest = TRUE, 
+                          labels = labels)
+
+brks_scale <- levels(lp1map$brks)  
+labels_scale <- rev(brks_scale)
+
+
+theme_map <- function(...) {  
+  theme_minimal() +
+    theme(
+      text = element_text(family = "Ubuntu Regular", color = "#22211d"),
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      # panel.grid.minor = element_line(color = "#ebebe5", size = 0.2),
+      panel.grid.major = element_line(color = "#ebebe5", size = 0.2),
+      panel.grid.minor = element_blank(),
+      plot.background = element_rect(fill = "#f5f5f2", color = NA), 
+      panel.background = element_rect(fill = "#f5f5f2", color = NA), 
+      legend.background = element_rect(fill = "#f5f5f2", color = NA),
+      panel.border = element_blank(),
+      ...
+    )
+}
+
+#crazy function just to extend the legend extremes
+extendLegendWithExtremes <- function(p){  
+  p_grob <- ggplotGrob(p)
+  legend <- gtable_filter(p_grob, "guide-box")
+  legend_grobs <- legend$grobs[[1]]$grobs[[1]]
+  # grab the first key of legend
+  legend_first_key <- gtable_filter(legend_grobs, "key-3-1-1")
+  legend_first_key$widths <- unit(2, units = "cm")
+  # modify its width and x properties to make it longer
+  legend_first_key$grobs[[1]]$width <- unit(2, units = "cm")
+  legend_first_key$grobs[[1]]$x <- unit(0.15, units = "cm")
+
+  # last key of legend
+  legend_last_key <- gtable_filter(legend_grobs, "key-3-6-1")
+  legend_last_key$widths <- unit(2, units = "cm")
+  # analogous
+  legend_last_key$grobs[[1]]$width <- unit(2, units = "cm")
+  legend_last_key$grobs[[1]]$x <- unit(1.02, units = "cm")
+
+  # grab the last label so we can also shift its position
+  legend_last_label <- gtable_filter(legend_grobs, "label-5-6")
+  legend_last_label$grobs[[1]]$x <- unit(2, units = "cm")
+
+  # Insert new color legend back into the combined legend
+  legend_grobs$grobs[legend_grobs$layout$name == "key-3-1-1"][[1]] <- 
+    legend_first_key$grobs[[1]]
+  legend_grobs$grobs[legend_grobs$layout$name == "key-3-6-1"][[1]] <- 
+    legend_last_key$grobs[[1]]
+  legend_grobs$grobs[legend_grobs$layout$name == "label-5-6"][[1]] <- 
+    legend_last_label$grobs[[1]]
+
+  # finally, I need to create a new label for the minimum value 
+  new_first_label <- legend_last_label$grobs[[1]]
+  new_first_label$label <- round(min(lp1map$anyconf_prob, na.rm = T), 2)
+  new_first_label$x <- unit(-0.15, units = "cm")
+  new_first_label$hjust <- 1
+
+  legend_grobs <- gtable_add_grob(legend_grobs, 
+                                  new_first_label, 
+                                  t = 6, 
+                                  l = 2, 
+                                  name = "label-5-0", 
+                                  clip = "off")
+  legend$grobs[[1]]$grobs[1][[1]] <- legend_grobs
+  p_grob$grobs[p_grob$layout$name == "guide-box"][[1]] <- legend
+
+  # the plot is now drawn using this grid function
+  grid.newpage()
+  grid.draw(p_grob)
+}
+
+
+library(viridis)
+p1 <- ggplot() +  
+  geom_polygon(data = lp1map, aes(fill = brks, 
+                                         x = long, 
+                                         y = lat, 
+                                         group = group)) +
+  # municipality outline
+  geom_path(data = lp1map, aes(x = long, 
+                                      y = lat, 
+                                      group = group), 
+            color = "white", size = 0.1) +
+  coord_equal() +
+  theme_map() +
+  theme(
+    legend.position = c(0.7, 0.03),
+    legend.text.align = 0,
+#    legend.background = element_rect(fill = alpha("white")),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47"),
+    legend.title = element_text(size = 16),
+    plot.title = element_text(size = 24, hjust = 0.8, color = "#4e4d47"),
+    plot.subtitle = element_text(size = 18, hjust = 0.8, face = "italic", color = "#4e4d47"),
+    plot.caption = element_text(size = 10, hjust = 0.95, color = "#4e4d47"),
+    plot.margin = unit(c(.5,.5,.2,.5), "cm"),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, 
+       y = NULL, 
+       title = "Haftar Faction - 2022", 
+       subtitle = "", 
+       caption = "") + 
+  scale_fill_manual(
+    values = magma(8, alpha = 0.8)[2:7],
+    breaks = rev(brks_scale),
+    name = "Probability",
+    drop = FALSE,
+    labels = labels_scale,
+    guide = guide_legend(
+      direction = "horizontal",
+      keyheight = unit(2, units = "mm"),
+      keywidth = unit(70/length(labels), units = "mm"),
+      title.position = 'top',
+      title.hjust = 0.5,
+      label.hjust = 1,
+      nrow = 1,
+      byrow = T,
+      reverse = T,
+      label.position = "bottom"
+    )
+  )
+
+p1 + geom_text_repel(data = lp1map, aes(x = long, y = lat, group = group, label = id))
+
+
+```
+
+```{r models_nat_acc, echo=FALSE, warning=FALSE, message = FALSE}
+
+libya_agg_year_adm2 <- 
+  libya_conflict %>%
+  dplyr::group_by(year, ADM2_EN) %>%
+  summarize(nat_accord = sum(nat_accord, na.rm = T)) %>%
+  dplyr::mutate(nat_accord_bin = ifelse(nat_accord >= 1, 1, 0)) 
+
+
+libya_agg_year_adm2 <-
+  libya_agg_year_adm2 %>%
+  ungroup() %>%
+  tidyr::complete(ADM2_EN, year) %>%
+  dplyr::select(-geometry) 
+  
+libya_agg_year_adm2 <-
+libya_agg_year_adm2 %>%
+  left_join(lib_spatial[,c("ADM2_EN", "dist", "r_tri", "nl", "ndvi")])
+
+
+libya_agg_year_adm2$nat_accord <- ifelse(is.na(libya_agg_year_adm2$nat_accord), 0, libya_agg_year_adm2$nat_accord)
+
+libya_agg_year_adm2$nat_accord_bin <- ifelse(is.na(libya_agg_year_adm2$nat_accord_bin), 0, libya_agg_year_adm2$nat_accord_bin)
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2020", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year != "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+# full model only
+# save preds for the optimal tuning parameter
+# class probs in addition to preds
+natacc_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",   
+   classProbs = TRUE,  
+   summaryFunction = twoClassSummary
+   )
+
+formreg <- nat_accord_bin ~ nl + ndvi + r_tri + dist
+
+# test on 2021
+
+train_libya_agg_year_adm2$nat_accord_bin <- ifelse(train_libya_agg_year_adm2$nat_accord_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$nat_accord_bin <- ifelse(test_libya_agg_year_adm2$nat_accord_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$nat_accord_bin <- as.factor(as.character(train_libya_agg_year_adm2$nat_accord_bin))
+test_libya_agg_year_adm2$nat_accord_bin <- as.factor(as.character(test_libya_agg_year_adm2$nat_accord_bin))
+
+lib_natacc_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = natacc_trControl
+)
+
+
+lib_natacc_gbm
+
+plot(lib_natacc_gbm)
+
+
+lib_natacc_preds <- bind_cols(
+   predict(lib_natacc_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_natacc_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$nat_accord_bin
+)
+
+lib_natacc_preds
+
+confmat_natacc <- confusionMatrix(lib_natacc_preds$Predicted, reference = test_libya_agg_year_adm2$nat_accord_bin)
+
+confmat_natacc
+
+
+lib_natacc_auc <- Metrics::auc(actual = lib_natacc_preds$Actual == "yes", lib_natacc_preds$yes)
+
+
+yardstick::roc_curve(lib_natacc_preds, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Predicted Presence of National Accord - GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(lib_natacc_auc, 4))
+  )
+
+# non XBoost AUC - .7294
+
+yardstick::gain_curve(lib_natacc_preds, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality GBM Gain Curve")
+
+plot(caret::varImp(lib_natacc_gbm), main="Variable Importance with Gradient Boosting")
+
+
+# carry out on 2022
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2021", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year == "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+
+train_libya_agg_year_adm2$nat_accord_bin <- ifelse(train_libya_agg_year_adm2$nat_accord_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$nat_accord_bin <- ifelse(test_libya_agg_year_adm2$nat_accord_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$nat_accord_bin <- as.factor(as.character(train_libya_agg_year_adm2$nat_accord_bin))
+test_libya_agg_year_adm2$nat_accord_bin <- as.factor(as.character(test_libya_agg_year_adm2$nat_accord_bin))
+
+lib_natacc_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = haftar_trControl
+)
+
+
+lib_natacc_gbm
+
+plot(lib_natacc_gbm)
+
+
+lib_natacc_preds <- bind_cols(
+   predict(lib_natacc_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_natacc_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$nat_accord_bin
+)
+
+lib_natacc_preds
+
+
+
+```
+
+```{r maps_natacc, echo=FALSE, warning=FALSE, message = FALSE}
+
+lib_natacc_preds$ADM2_EN <- test_libya_agg_year_adm2$ADM2_EN
+
+lp2 <- lib_spatial %>% dplyr::left_join(lib_natacc_preds)
+
+lp2map <- as(lp2, "Spatial")
+
+lp2map <- fortify(lp2map, region = "ADM2_EN")
+
+
+lp2map <- lp2map %>% dplyr::left_join(lp2, by = c("id" = "ADM2_EN"))
+
+pretty_breaks <- c(.20,.40,.60,.80)
+
+# find the extremes
+minVal <- min(lp2map$yes, na.rm = T)  
+maxVal <- max(lp2map$yes, na.rm = T)  
+# compute labels
+labels <- c()  
+brks <- c(minVal, pretty_breaks, maxVal)  
+# round the labels (actually, only the extremes)
+for(idx in 1:length(brks)){  
+  labels <- c(labels,round(brks[idx + 1], 2))
+}
+
+labels <- labels[1:length(labels)-1]  
+# define a new variable on the data with the breaks
+lp2map$brks <- cut(lp2map$yes,  
+                          breaks = brks, 
+                          include.lowest = TRUE, 
+                          labels = labels)
+
+brks_scale <- levels(lp2map$brks)  
+labels_scale <- rev(brks_scale)
+
+
+library(viridis)
+p2 <- ggplot() +  
+  geom_polygon(data = lp2map, aes(fill = brks, 
+                                         x = long, 
+                                         y = lat, 
+                                         group = group)) +
+  # municipality outline
+  geom_path(data = lp2map, aes(x = long, 
+                                      y = lat, 
+                                      group = group), 
+            color = "white", size = 0.1) +
+  coord_equal() +
+  theme_map() +
+  theme(
+    legend.position = c(0.7, 0.03),
+    legend.text.align = 0,
+#    legend.background = element_rect(fill = alpha("white")),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47"),
+    legend.title = element_text(size = 16),
+    plot.title = element_text(size = 24, hjust = 0.8, color = "#4e4d47"),
+    plot.subtitle = element_text(size = 18, hjust = 0.8, face = "italic", color = "#4e4d47"),
+    plot.caption = element_text(size = 10, hjust = 0.95, color = "#4e4d47"),
+    plot.margin = unit(c(.5,.5,.2,.5), "cm"),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, 
+       y = NULL, 
+       title = "National Accord - 2022", 
+       subtitle = "", 
+       caption = "") + 
+  scale_fill_manual(
+    values = magma(8, alpha = 0.8)[2:7],
+    breaks = rev(brks_scale),
+    name = "Probability",
+    drop = FALSE,
+    labels = labels_scale,
+    guide = guide_legend(
+      direction = "horizontal",
+      keyheight = unit(2, units = "mm"),
+      keywidth = unit(70/length(labels), units = "mm"),
+      title.position = 'top',
+      title.hjust = 0.5,
+      label.hjust = 1,
+      nrow = 1,
+      byrow = T,
+      reverse = T,
+      label.position = "bottom"
+    )
+  )
+
+p2 
+
+```
+
+```{r models_haftar_nat_acc, echo=FALSE, warning=FALSE, message = FALSE}
+
+libya_agg_year_adm2 <- 
+  libya_conflict %>%
+  dplyr::group_by(year, ADM2_EN) %>%
+  dplyr::mutate(natacc_haftar = ifelse(nat_accord >= 1 & haftar_faction >= 1, 1, 0)) %>%
+  summarize(natacc_haftar = sum(natacc_haftar, na.rm = T)) %>%
+  dplyr::mutate(natacc_haftar_bin = ifelse(natacc_haftar >= 1, 1, 0)) 
+
+
+libya_agg_year_adm2 <-
+  libya_agg_year_adm2 %>%
+  ungroup() %>%
+  tidyr::complete(ADM2_EN, year) %>%
+  dplyr::select(-geometry) 
+  
+libya_agg_year_adm2 <-
+libya_agg_year_adm2 %>%
+  left_join(lib_spatial[,c("ADM2_EN", "dist", "r_tri", "nl", "ndvi")])
+
+
+libya_agg_year_adm2$natacc_haftar <- ifelse(is.na(libya_agg_year_adm2$natacc_haftar), 0, libya_agg_year_adm2$natacc_haftar)
+
+libya_agg_year_adm2$natacc_haftar_bin <- ifelse(is.na(libya_agg_year_adm2$natacc_haftar_bin), 0, libya_agg_year_adm2$natacc_haftar_bin)
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2020", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year != "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+# full model only
+# save preds for the optimal tuning parameter
+# class probs in addition to preds
+natacc_haftar_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",   
+   classProbs = TRUE,  
+   summaryFunction = twoClassSummary
+   )
+
+formreg <- natacc_haftar_bin ~ nl + ndvi + r_tri + dist
+
+# test on 2021
+
+train_libya_agg_year_adm2$natacc_haftar_bin <- ifelse(train_libya_agg_year_adm2$natacc_haftar_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$natacc_haftar_bin <- ifelse(test_libya_agg_year_adm2$natacc_haftar_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(train_libya_agg_year_adm2$natacc_haftar_bin))
+test_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(test_libya_agg_year_adm2$natacc_haftar_bin))
+
+lib_natacchftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = natacc_haftar_trControl
+)
+
+
+lib_natacchftar_gbm
+
+plot(lib_natacchftar_gbm)
+
+
+lib_natacchftar_preds <- bind_cols(
+   predict(lib_natacchftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_natacchftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$natacc_haftar_bin
+)
+
+lib_natacchftar_preds
+
+confmat_natacc <- confusionMatrix(lib_natacchftar_preds$Predicted, reference = test_libya_agg_year_adm2$natacc_haftar_bin)
+
+confmat_natacc
+
+
+lib_haftar_natacc_auc <- Metrics::auc(actual = lib_natacchftar_preds$Actual == "yes", lib_natacchftar_preds$yes)
+
+
+yardstick::roc_curve(lib_natacchftar_preds, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Predicted Presence of Events Involvin Haftar & National Accord - GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(lib_haftar_natacc_auc, 4))
+  )
+
+
+
+yardstick::gain_curve(lib_natacc_preds, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality GBM Gain Curve")
+
+plot(caret::varImp(lib_natacc_gbm), main="Variable Importance with Gradient Boosting")
+
+
+# carry out on 2022
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2021", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year == "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+
+train_libya_agg_year_adm2$natacc_haftar_bin <- ifelse(train_libya_agg_year_adm2$natacc_haftar_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$natacc_haftar_bin <- ifelse(test_libya_agg_year_adm2$natacc_haftar_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(train_libya_agg_year_adm2$natacc_haftar_bin))
+test_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(test_libya_agg_year_adm2$natacc_haftar_bin))
+
+lib_natacc_haftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = haftar_trControl
+)
+
+
+lib_natacc_haftar_gbm
+
+plot(lib_natacc_haftar_gbm)
+
+
+lib_natacc_haftar_preds <- bind_cols(
+   predict(lib_natacc_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_natacc_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$natacc_haftar_bin
+)
+
+lib_natacc_haftar_preds
+
+
+
+```
+
+```{r maps_natacc_haftar, echo=FALSE, warning=FALSE, message = FALSE}
+
+lib_natacc_haftar_preds$ADM2_EN <- test_libya_agg_year_adm2$ADM2_EN
+
+lp3 <- lib_spatial %>% dplyr::left_join(lib_natacc_haftar_preds)
+
+lp3map <- as(lp3, "Spatial")
+
+lp3map <- fortify(lp3map, region = "ADM2_EN")
+
+
+lp3map <- lp3map %>% dplyr::left_join(lp3, by = c("id" = "ADM2_EN"))
+
+pretty_breaks <- c(.20,.40,.60,.80)
+
+# find the extremes
+minVal <- min(lp3map$yes, na.rm = T)  
+maxVal <- max(lp3map$yes, na.rm = T)  
+# compute labels
+labels <- c()  
+brks <- c(minVal, pretty_breaks, maxVal)  
+# round the labels (actually, only the extremes)
+for(idx in 1:length(brks)){  
+  labels <- c(labels,round(brks[idx + 1], 2))
+}
+
+labels <- labels[1:length(labels)-1]  
+# define a new variable on the data with the breaks
+lp3map$brks <- cut(lp3map$yes,  
+                          breaks = brks, 
+                          include.lowest = TRUE, 
+                          labels = labels)
+
+brks_scale <- levels(lp3map$brks)  
+labels_scale <- rev(brks_scale)
+
+
+library(viridis)
+p <- ggplot() +  
+  geom_polygon(data = lp3map, aes(fill = brks, 
+                                         x = long, 
+                                         y = lat, 
+                                         group = group)) +
+  # municipality outline
+  geom_path(data = lp3map, aes(x = long, 
+                                      y = lat, 
+                                      group = group), 
+            color = "white", size = 0.1) +
+  coord_equal() +
+  theme_map() +
+  theme(
+    legend.position = c(0.7, 0.03),
+    legend.text.align = 0,
+#    legend.background = element_rect(fill = alpha("white")),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47"),
+    legend.title = element_text(size = 16),
+    plot.title = element_text(size = 24, hjust = 0.8, color = "#4e4d47"),
+    plot.subtitle = element_text(size = 18, hjust = 0.8, face = "italic", color = "#4e4d47"),
+    plot.caption = element_text(size = 10, hjust = 0.95, color = "#4e4d47"),
+    plot.margin = unit(c(.5,.5,.2,.5), "cm"),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, 
+       y = NULL, 
+       title = "Predicted Presence of the National Accord - 2022", 
+       subtitle = "Libya ADMIN-2", 
+       caption = "CDA") + 
+  scale_fill_manual(
+    values = magma(8, alpha = 0.8)[2:7],
+    breaks = rev(brks_scale),
+    name = "Probability",
+    drop = FALSE,
+    labels = labels_scale,
+    guide = guide_legend(
+      direction = "horizontal",
+      keyheight = unit(2, units = "mm"),
+      keywidth = unit(70/length(labels), units = "mm"),
+      title.position = 'top',
+      title.hjust = 0.5,
+      label.hjust = 1,
+      nrow = 1,
+      byrow = T,
+      reverse = T,
+      label.position = "bottom"
+    )
+  )
+
+p 
+
+```
+
+
+```{r models_haftar_is, echo=FALSE, warning=FALSE, message = FALSE}
+
+libya_agg_year_adm2 <- 
+  libya_conflict %>%
+  dplyr::group_by(year, ADM2_EN) %>%
+  dplyr::mutate(isis_haftar = ifelse(isis >= 1 & haftar_faction >= 1, 1, 0)) %>%
+  summarize(isis_haftar = sum(isis_haftar, na.rm = T)) %>%
+  dplyr::mutate(isis_haftar_bin = ifelse(isis_haftar >= 1, 1, 0)) 
+
+
+libya_agg_year_adm2 <-
+  libya_agg_year_adm2 %>%
+  ungroup() %>%
+  tidyr::complete(ADM2_EN, year) %>%
+  dplyr::select(-geometry) 
+  
+libya_agg_year_adm2 <-
+libya_agg_year_adm2 %>%
+  left_join(lib_spatial[,c("ADM2_EN", "dist", "r_tri", "nl", "ndvi")])
+
+
+libya_agg_year_adm2$isis_haftar <- ifelse(is.na(libya_agg_year_adm2$isis_haftar), 0, libya_agg_year_adm2$isis_haftar)
+
+libya_agg_year_adm2$isis_haftar_bin <- ifelse(is.na(libya_agg_year_adm2$isis_haftar_bin), 0, libya_agg_year_adm2$isis_haftar_bin)
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2020", "TRAIN", "TEST")
+ 
+test_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TEST") %>%
+  dplyr::filter(year != "2022")
+
+train_libya_agg_year_adm2 <- libya_agg_year_adm2 %>%
+  dplyr::filter(split_dummy == "TRAIN") %>%
+  dplyr::filter(year > "2015")
+
+# full model only
+# save preds for the optimal tuning parameter
+# class probs in addition to preds
+isis_haftar_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",   
+   classProbs = TRUE,  
+   summaryFunction = twoClassSummary
+   )
+
+formreg <- isis_haftar_bin ~ nl + ndvi + r_tri + dist
+
+# test on 2021
+
+train_libya_agg_year_adm2$isis_haftar_bin <- ifelse(train_libya_agg_year_adm2$isis_haftar_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$isis_haftar_bin <- ifelse(test_libya_agg_year_adm2$isis_haftar_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$isis_haftar_bin <- as.factor(as.character(train_libya_agg_year_adm2$isis_haftar_bin))
+test_libya_agg_year_adm2$isis_haftar_bin <- as.factor(as.character(test_libya_agg_year_adm2$isis_haftar_bin))
+
+lib_isis_haftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = isis_haftar_trControl
+)
+
+
+lib_isis_haftar_gbm
+
+plot(lib_isis_haftar_gbm)
+
+
+lib_isis_haftar_gbm_preds <- bind_cols(
+   predict(lib_isis_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_isis_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$isis_haftar_bin
+)
+
+lib_isis_haftar_gbm_preds
+
+confmat_isishaftar <- confusionMatrix(lib_isis_haftar_gbm_preds$Predicted, reference = test_libya_agg_year_adm2$isis_haftar_bin)
+
+confmat_isishaftar
+
+# carry out on 2022
+
+
+libya_agg_year_adm2$split_dummy <- ifelse(libya_agg_year_adm2$year <= "2021", "TRAIN", "TEST")
+ 
+train_libya_agg_year_adm2$isis_haftar_bin <- ifelse(train_libya_agg_year_adm2$isis_haftar_bin == 1, "yes", "no")
+test_libya_agg_year_adm2$isis_haftar_bin <- ifelse(test_libya_agg_year_adm2$isis_haftar_bin == 1, "yes", "no")
+
+train_libya_agg_year_adm2$isis_haftar_bin <- as.factor(as.character(train_libya_agg_year_adm2$isis_haftar_bin))
+test_libya_agg_year_adm2$isis_haftar_bin <- as.factor(as.character(test_libya_agg_year_adm2$isis_haftar_bin))
+
+train_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(train_libya_agg_year_adm2$natacc_haftar_bin))
+test_libya_agg_year_adm2$natacc_haftar_bin <- as.factor(as.character(test_libya_agg_year_adm2$natacc_haftar_bin))
+
+lib_natacc_haftar_gbm <- train(
+   formreg, 
+   data = train_libya_agg_year_adm2, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = haftar_trControl
+)
+
+lib_isis_haftar_gbm
+
+plot(lib_isis_haftar_gbm)
+
+
+lib_isis_haftar_gbm_preds <- bind_cols(
+   predict(lib_isis_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "prob"),
+   Predicted = predict(lib_isis_haftar_gbm, newdata = test_libya_agg_year_adm2, type = "raw"),
+   Actual = test_libya_agg_year_adm2$isis_haftar_bin
+)
+
+lib_isis_haftar_gbm_preds
+
+confmat_isishaftar <- confusionMatrix(lib_isis_haftar_gbm_preds$Predicted, reference = lib_isis_haftar_gbm_preds$Actual)
+
+confmat_isishaftar
+
+
+
+```
+
+```{r maps_is_haftar, echo=FALSE, warning=FALSE, message = FALSE}
+
+lib_natacc_haftar_preds$ADM2_EN <- test_libya_agg_year_adm2$ADM2_EN
+
+lp4 <- lib_spatial %>% dplyr::left_join(lib_natacc_haftar_preds)
+
+lp4map <- as(lp4, "Spatial")
+
+lp4map <- fortify(lp4map, region = "ADM2_EN")
+
+
+lp4map <- lp4map %>% dplyr::left_join(lp4, by = c("id" = "ADM2_EN"))
+
+pretty_breaks <- c(.20,.40,.60,.80)
+
+# find the extremes
+minVal <- min(lp4map$yes, na.rm = T)  
+maxVal <- max(lp4map$yes, na.rm = T)  
+# compute labels
+labels <- c()  
+brks <- c(minVal, pretty_breaks, maxVal)  
+# round the labels (actually, only the extremes)
+for(idx in 1:length(brks)){  
+  labels <- c(labels,round(brks[idx + 1], 2))
+}
+
+labels <- labels[1:length(labels)-1]  
+# define a new variable on the data with the breaks
+lp4map$brks <- cut(lp4map$yes,  
+                          breaks = brks, 
+                          include.lowest = TRUE, 
+                          labels = labels)
+
+brks_scale <- levels(lp4map$brks)  
+labels_scale <- rev(brks_scale)
+
+
+library(viridis)
+p4 <- ggplot() +  
+  geom_polygon(data = lp4map, aes(fill = brks, 
+                                         x = long, 
+                                         y = lat, 
+                                         group = group)) +
+  # municipality outline
+  geom_path(data = lp4map, aes(x = long, 
+                                      y = lat, 
+                                      group = group), 
+            color = "white", size = 0.1) +
+  coord_equal() +
+  theme_map() +
+  theme(
+    legend.position = c(0.7, 0.03),
+    legend.text.align = 0,
+#    legend.background = element_rect(fill = alpha("white")),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47"),
+    legend.title = element_text(size = 16),
+    plot.title = element_text(size = 24, hjust = 0.8, color = "#4e4d47"),
+    plot.subtitle = element_text(size = 18, hjust = 0.8, face = "italic", color = "#4e4d47"),
+    plot.caption = element_text(size = 10, hjust = 0.95, color = "#4e4d47"),
+    plot.margin = unit(c(.5,.5,.2,.5), "cm"),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, 
+       y = NULL, 
+       title = "Predicted Conflict\nHaftar Faction and ISIS - 2022", 
+       subtitle = "Libya ADMIN-2", 
+       caption = "CDA") + 
+  scale_fill_manual(
+    values = magma(8, alpha = 0.8)[2:7],
+    breaks = rev(brks_scale),
+    name = "Probability",
+    drop = FALSE,
+    labels = labels_scale,
+    guide = guide_legend(
+      direction = "horizontal",
+      keyheight = unit(2, units = "mm"),
+      keywidth = unit(70/length(labels), units = "mm"),
+      title.position = 'top',
+      title.hjust = 0.5,
+      label.hjust = 1,
+      nrow = 1,
+      byrow = T,
+      reverse = T,
+      label.position = "bottom"
+    )
+  )
+
+p4 
+
+```
+
+
+
+```{r extra_analysis, cols.print = 12, rows.print = 12, echo=FALSE, warning=FALSE, message = FALSE}
+
+predvals <- data.frame(ADM1_EN = lp1$ADM1_EN, ADM2_EN = lp1$ADM2_EN, Haftar_Presence = lp1$yes, Natl_Accord_Presence = lp2$yes) %>% dplyr::arrange(desc(Haftar_Presence))
+
+library(grid)
+library(gridExtra)
+
+grid.arrange(p1, p2, ncol = 2,  nrow = 1)
+
+libya_conflict %>%
+  sf::st_drop_geometry() %>%
+  dplyr::group_by(Year = year) %>%
+  dplyr::summarize(Total_Events = n(), 
+                   Total_Fatalities = sum(fatalities, na.rm = T)) %>%
+  dplyr::filter(Year > 2010) %>%
+  dplyr::mutate_all(dplyr::funs(as.numeric(.))) 
+
+lib_agg_year_mun %>% st_drop_geometry %>% dplyr::group_by(admin2) %>% dplyr::summarize(Fatalities = sum(fatalities)) %>% dplyr::mutate(Percent = round(Fatalities/sum(Fatalities), 2)) %>% dplyr::arrange(desc(Percent))
+
+lib_agg_year_mun %>% st_drop_geometry %>% dplyr::filter(year > 2013) %>% dplyr::group_by(admin2) %>% dplyr::summarize(Fatalities = sum(fatalities)) %>% dplyr::mutate(Percent = round(Fatalities/sum(Fatalities), 2)) %>% dplyr::arrange(desc(Percent))
+
+
+
+predvals1 <- data.frame(ADM1_EN = lp4$ADM1_EN, ADM2_EN = lp4$ADM2_EN, Probability_of_Conflict = lp4$yes) %>% dplyr::arrange(desc(Probability_of_Conflict))
+
+predvals1
+
+```

@@ -1,0 +1,1010 @@
+---
+title: "Conflict Analysis - Central African Republic"
+author: "CDA"
+date: "5/20/2022"
+output: html_document
+---
+
+```{r setup, echo=FALSE, warning=FALSE, message = FALSE, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(readstata13)
+library(tidyverse)
+library(xlsx)
+library(RColorBrewer)
+library(ggstatsplot)
+library(sjPlot)
+library(psych)
+library(broom)
+library(timeSeries)
+library(data.table)
+library(ggplot2)
+library(sjmisc)
+library(expss) 
+library(lubridate)
+library(scales)
+library(corrplot)
+library(MASS)
+library(reshape2)
+library(ggridges)
+library(grid)
+library(ggrepel)
+library(countrycode)
+library(WDI)
+library(visNetwork)
+library(ggthemes)
+library(directlabels)
+library(fuzzyjoin)
+library(vtable)
+library(haven)
+library(lme4)
+library(brms)
+library(acled.api)
+library(tseries)
+library(sf)
+library(xts)
+library(GGally)
+library(MLmetrics)
+library(pROC)
+
+library(glmnet)
+library(caret)
+library(Metrics)
+library(yardstick)
+library(gbm)
+library(nnet)
+library(themis)
+library(randomForest)
+
+require(tidymodels)
+require(tidyposterior)
+require(tsibble)  #tsibble for time series based on tidy principles
+require(fable)  #for forecasting based on tidy principles
+require(ggfortify)  #for plotting timeseries
+require(forecast)  #for forecast function
+library(fpp2)
+require(chron)
+require(zoo)
+require(lmtest)
+require(TTR)  #for smoothing the time series
+```
+
+
+```{r acled_api, echo=FALSE, warning=FALSE, message = FALSE}
+cra_conflict <- acled.api( # stores an ACLED sample in object my.data.frame
+  email.address = "jamie_parr@dai.com",
+  access.key = "q9ByJkq9*sNQS8NkJNL0",
+  country = c("Central African Republic"), 
+  all.variables = TRUE,
+  start.date = "1997-01-01", 
+  end.date = Sys.Date())
+
+
+
+cra_conflict$year = lubridate::year(cra_conflict$event_date)
+cra_conflict$yday = yday(cra_conflict$event_date)
+cra_conflict$quarter = quarter(cra_conflict$event_date)
+cra_conflict$month = lubridate::month(cra_conflict$event_date)
+cra_conflict$day = lubridate::day(cra_conflict$event_date)
+
+```
+
+
+```{r timeSeries, echo=FALSE, warning=FALSE, message = FALSE}
+
+cra_daily_mun <- 
+  cra_conflict %>%
+  dplyr::group_by(admin2, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date)
+
+cra_daily_mun <-
+  cra_daily_mun %>%
+  mutate(event_date = as.Date(event_date))
+
+cra_daily <-  
+cra_daily_mun %>%
+  dplyr::select(-contains("admin2")) %>%
+  group_by(date = event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  dplyr::mutate(date = as.Date(date), 
+                fatalities =ifelse(is.na(fatalities), 0, fatalities))
+
+cra_daily %>%  
+  ggplot(., aes(x = date, y = fatalities))  +
+  geom_line()+
+  xlab("Year") +
+  ylab("Fatalities") + 
+  ggtitle("Fatalities by Day")
+
+autoplot(ts(diff(cra_daily$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Day") +
+  ggtitle("Day to Day Change in Fatalities")
+  
+cra_agg_monthly <-
+cra_conflict %>%
+  dplyr::select(-admin2) %>%
+  group_by(year, month) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(date = as.yearmon(paste(year, month), "%Y %m")) %>%
+  dplyr::select(-year, -month) %>%
+  as.data.frame()
+
+# as.POSIXct(d, format = '%Y-%m-%d') 
+# cra_agg <- xts(cra_agg$fatalities, cra_agg$date)
+
+# cra_agg <- ts(cra_agg$fatalities, start = min(cra_agg$date), end = max(cra_agg$date), frequency = 1)
+
+cra_agg_year <- 
+  cra_daily %>%
+  dplyr::mutate(year = lubridate::year(date)) %>%
+  dplyr::group_by(year) %>%
+  summarize(fatalities = sum(fatalities, na.rm = T))
+
+cra_agg_monthly_cut <- cra_agg_monthly %>%
+  dplyr::filter(date > "Dec 2018")
+
+ggseasonplot(ts(cra_agg_monthly_cut$fatalities, frequency = 12, start = c(2019, 1), end = c(2022, 4)), year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("Fatalities") +
+  ggtitle("CAR: Fatalities by Month")
+
+
+
+
+autoplot(ts(diff(cra_agg_monthly$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Months") +
+  ggtitle("Month to Month Change in Fatalities")
+
+
+cra_d7 <- 
+  cra_daily %>%
+  dplyr::mutate(wday = wday(as.Date(date)),
+                year = year(date)) %>%
+  dplyr::group_by(wday, year) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T))
+
+ggplot(cra_d7, aes(x = wday, y = fatalities, color = factor(year))) +
+  geom_line() +
+  ylab("Fatalities") +
+  xlab("Day of Week") +
+  labs(color = "Year") +
+  ggtitle("Libya: Fatalities by Day of Week")
+
+cra_agg_year_mun <- 
+  cra_conflict %>%
+  dplyr::group_by(admin2) %>%
+  dplyr::mutate(index = cur_group_id()) %>%
+  dplyr::mutate(year = year(event_date),
+                fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::group_by(year, admin2) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) 
+
+ggplot(cra_agg_year_mun, aes(x = year, y = fatalities, color = admin2)) +
+  geom_line() +
+#  theme(legend.position = 'none') +
+  ggtitle("Yearly Trend in Fatalities by Muhafazat")
+
+ggAcf(ts(cra_d7$fatalities, frequency = 4, start = c(1997, 1), end = c(2022, 1) ))
+ggAcf(ts(cra_agg_monthly$fatalities, frequency = 12, start = 1997, end = 2022))
+
+
+cra_conflict %>%
+  dplyr::group_by(admin1, event_date) %>%
+  dplyr::filter(year >= "2010") %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = admin1)) +
+  geom_line() +
+  facet_wrap(. ~ admin1) +
+  ggthemes::theme_fivethirtyeight() +
+  theme(legend.position = "none") +
+  ggtitle("Daily Sum of Fatalities by Prefecture - 2010-Present")
+
+
+cra_conflict %>%
+  dplyr::group_by(admin2, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::filter(!is.na(admin2)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = admin2)) +
+  geom_line() +
+  facet_wrap(. ~ admin2) +
+  theme(legend.position = "none")
+
+
+
+
+auto.arima(ts(cra_agg_monthly$fatalities, frequency = 181))
+auto.arima(ts(cra_agg_monthly$fatalities, frequency = 181), trace = T)
+auto.arima(ts(cra_agg_monthly$fatalities, frequency = 181), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+mon_fat_arima = arima(ts(cra_agg_monthly$fatalities, frequency = 181), order = c(1,0,2))
+mon_fat_arima
+
+tail(ts(cra_agg_monthly$fatalities, frequency = 181))
+residuals(mon_fat_arima)
+
+arimafore <- forecast(mon_fat_arima, h = 12)
+autoplot(arimafore)
+
+
+auto.arima(ts(diff(cra_daily$fatalities), frequency = 3197))
+auto.arima(ts(diff(cra_daily$fatalities), frequency = 3197), trace = T)
+auto.arima(ts(diff(cra_daily$fatalities), frequency = 3197), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+daily_fat_arima = arima(ts(diff(cra_daily$fatalities), frequency = 3197), order = c(0,0,4))
+daily_fat_arima
+
+tail(ts(diff(cra_daily$fatalities), frequency = 1572))
+residuals(daily_fat_arima)
+
+arimafore <- forecast(daily_fat_arima, h = 365)
+autoplot(arimafore)
+
+
+plot(forecast( ets(cra_daily$fatalities), h = 365))
+
+
+
+```
+
+```{r desc_actors, cols.print = 12, rows.print = 20, echo=FALSE, warning=FALSE, message = FALSE}
+
+
+cra_conflict %>% 
+  dplyr::count(actor1) %>%
+  dplyr::arrange(desc(n))
+
+cra_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(actor1) %>%
+  dplyr::arrange(desc(n))
+
+cra_conflict %>% 
+  dplyr::count(actor2) %>%
+  dplyr::arrange(desc(n))
+
+cra_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2017-01-01") %>%
+  dplyr::count(actor2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+cra_conflict %>% 
+  dplyr::count(assoc_actor_1) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+cra_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(assoc_actor_1) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+cra_conflict %>% 
+  dplyr::count(assoc_actor_2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+cra_conflict %>% 
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(event_date > "2020-01-01") %>%
+  dplyr::count(assoc_actor_2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head()
+
+cra_conflict %>% 
+#  st_drop_geometry() %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::filter(event_date > "2014-07-01") %>%
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n)) %>%
+  head(20L) %>%
+  View(.)
+
+
+actors_violent_conf_04_07 <- 
+  cra_conflict %>% 
+#  st_drop_geometry() %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::filter(event_date > "2004-01-01" & event_date < "2008-01-01") %>%
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::filter(actor1 != "Civilians (Central African Republic)" & actor2 != "Civilians (Central African Republic)") %>%
+  dplyr::filter(actor1 != "Rioters (Central African Republic)" & actor2 != "Rioters (Central African Republic)") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n))
+
+actors_violent_conf_12_13 <- 
+  cra_conflict %>% 
+#  st_drop_geometry() %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::filter(event_date > "2012-01-01" & event_date < "2014-01-01") %>%
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::filter(actor1 != "Civilians (Central African Republic)" & actor2 != "Civilians (Central African Republic)") %>%
+  dplyr::filter(actor1 != "Rioters (Central African Republic)" & actor2 != "Rioters (Central African Republic)") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n))
+
+
+actors_violent_conf_14_20 <- 
+  cra_conflict %>% 
+#  st_drop_geometry() %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::filter(event_date > "2014-01-01" & event_date < "2021-01-01") %>%
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::filter(actor1 != "Civilians (Central African Republic)" & actor2 != "Civilians (Central African Republic)") %>%
+  dplyr::filter(actor1 != "Rioters (Central African Republic)" & actor2 != "Rioters (Central African Republic)") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n))
+
+actors_violent_conf_21_pres <- 
+  cra_conflict %>% 
+#  st_drop_geometry() %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::filter(event_date > "2021-01-01" & event_date <= Sys.Date()) %>%
+  dplyr::filter(actor1 != "" & actor2 != "") %>%
+  dplyr::filter(actor1 != "Civilians (Central African Republic)" & actor2 != "Civilians (Central African Republic)") %>%
+  dplyr::filter(actor1 != "Rioters (Central African Republic)" & actor2 != "Rioters (Central African Republic)") %>%
+  dplyr::count(actor1, actor2) %>%
+  dplyr::arrange(desc(n))
+
+
+colnames(actors_violent_conf) <- c("from", "to", "n")
+
+colnames(actors_violent_conf_04_07) <- c("from", "to", "n")
+colnames(actors_violent_conf_12_13) <- c("from", "to", "n")
+colnames(actors_violent_conf_14_20) <- c("from", "to", "n")
+colnames(actors_violent_conf_21_pres) <- c("from", "to", "n")
+
+
+actors_violent_conf_04_07 <-
+actors_violent_conf_04_07 %>%
+  mutate(from = case_when(str_detect(from, "APRD") ~ "APRD",
+                          str_detect(from, "UFDR") ~ "UFDR",
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "CPC") ~ "CPC",
+                          
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "UPC") ~ "UPC",
+                          str_detect(from, "MPC") ~ "MPC",
+                          str_detect(from, "MINUSCA") ~ "MINUSCA",
+                          str_detect(from, "LRA") ~ "LRA",
+                          str_detect(from, "Unidentified") ~ "UAG",
+                          str_detect(from, "FPRC") ~ "FPRC",
+                          str_detect(from, "Military Forces") ~ "CAR Military",
+                          str_detect(from, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(from, "RJ: Revolution and Justice") ~ "RJ",
+                          str_detect(from, "RRR") ~ "RRR",
+                          TRUE ~ from),
+         to = case_when(str_detect(to, "APRD") ~ "APRD",
+                        str_detect(to, "UFDR") ~ "UFDR",
+                        str_detect(to, "CPC") ~ "CPC",
+                          str_detect(to, "UPC") ~ "UPC",
+                          str_detect(to, "MPC") ~ "MPC",
+                          str_detect(to, "MINUSCA") ~ "MINUSCA",
+                          str_detect(to, "LRA") ~ "LRA",
+                          str_detect(to, "Unidentified") ~ "UAG",
+                          str_detect(to, "FPRC") ~ "FPRC",
+                          str_detect(to, "Military Forces") ~ "CAR Military",
+                          str_detect(to, "RRR") ~ "RRR",
+                          str_detect(to, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(to, "RJ: Revolution and Justice") ~ "RJ",
+                          TRUE ~ to)
+         )
+
+library(tidygraph)
+library(igraph)
+g <- graph_from_data_frame(actors_violent_conf_04_07)
+am <- as_adjacency_matrix(g)
+
+# Create Igraph object
+g <- graph_from_adjacency_matrix(am, mode="undirected")
+# Make a tidygraph object from it. Igraph methods can still be called on it.
+cra_graph_actor_conflict <- as_tbl_graph(g)
+
+
+library(ggraph)
+# random numbers for placement of nodes
+plane <- c(1000, 1000)
+x = plane[1] * runif(am@Dim[1])
+y = plane[2] * runif(am@Dim[1])
+# Add spacial positions, hub distance and degree information to the nodes.
+hub_id <- which.max(degree(g))
+
+cra_graph_actor_conflict <- 
+  cra_graph_actor_conflict %>%
+  activate(nodes) %>%
+  mutate(
+    x = x,
+    y = y, 
+#    hub_dist = replace_na(bfs_dist(root = hub_id), Inf),
+    degree = degree(g),
+#    friends_of_friends = replace_na(local_ave_degree(), 0),
+    centrality = centrality_authority(),
+    cluster = as.factor(group_infomap(trials = 5))
+  )
+
+cra_graph_actor_conflict %>%
+  mutate(centrality = centrality_authority()) %>% 
+  ggraph(layout = "kk") +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA))) + 
+  geom_edge_diagonal(color = "gray", alpha = 0.4) +
+  theme(legend.position = "none")
+
+
+ cra_graph_actor_conflict %>%
+  ggraph(layout = tibble(V(.)$x, V(.)$y)) +
+  geom_edge_link(width = .1) +
+  geom_node_point(aes(size = centrality, color = degree, alpha = .5)) +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA), color = degree)) + 
+  scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  coord_fixed() +
+  guides(size = FALSE)
+
+ 
+cra_graph_actor_conflict %>%
+  ggraph(layout = tibble(V(.)$x, V(.)$y)) +
+  geom_edge_link(width = .1) +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA), color = cluster)) + 
+#   geom_node_point(aes(size = centrality, color = cluster)) +
+#  scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  geom_edge_diagonal(color = "gray", alpha = 0.4) +
+  coord_fixed() +
+  guides(size = FALSE)
+
+cra_graph_actor_conflict %>%
+  ggraph(layout = "dh") +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA), color = cluster)) + 
+   geom_node_point(aes(size = centrality, color = cluster), alpha = .5) +
+ # scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  geom_edge_diagonal(color = "blue", alpha = 0.6) +
+  coord_fixed() +
+  guides(size = FALSE, color = FALSE)
+
+
+actors_violent_conf_12_13 <-
+actors_violent_conf_12_13 %>%
+  mutate(from = case_when(str_detect(from, "APRD") ~ "APRD",
+                          str_detect(from, "UFDR") ~ "UFDR",
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "CPC") ~ "CPC",
+                          
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "UPC") ~ "UPC",
+                          str_detect(from, "MPC") ~ "MPC",
+                          str_detect(from, "MINUSCA") ~ "MINUSCA",
+                          str_detect(from, "LRA") ~ "LRA",
+                          str_detect(from, "Unidentified") ~ "UAG",
+                          str_detect(from, "FPRC") ~ "FPRC",
+                          str_detect(from, "Military Forces") ~ "CAR Military",
+                          str_detect(from, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(from, "RJ: Revolution and Justice") ~ "RJ",
+                          str_detect(from, "RRR") ~ "RRR",
+                          TRUE ~ from),
+         to = case_when(str_detect(to, "APRD") ~ "APRD",
+                        str_detect(to, "UFDR") ~ "UFDR",
+                        str_detect(to, "CPC") ~ "CPC",
+                          str_detect(to, "UPC") ~ "UPC",
+                          str_detect(to, "MPC") ~ "MPC",
+                          str_detect(to, "MINUSCA") ~ "MINUSCA",
+                          str_detect(to, "LRA") ~ "LRA",
+                          str_detect(to, "Unidentified") ~ "UAG",
+                          str_detect(to, "FPRC") ~ "FPRC",
+                          str_detect(to, "Military Forces") ~ "CAR Military",
+                          str_detect(to, "RRR") ~ "RRR",
+                          str_detect(to, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(to, "RJ: Revolution and Justice") ~ "RJ",
+                          TRUE ~ to)
+         )
+
+g <- graph_from_data_frame(actors_violent_conf_12_13)
+am <- as_adjacency_matrix(g)
+
+# Create Igraph object
+g <- graph_from_adjacency_matrix(am, mode="undirected")
+# Make a tidygraph object from it. Igraph methods can still be called on it.
+cra_graph_actor_conflict <- as_tbl_graph(g)
+
+
+library(ggraph)
+# random numbers for placement of nodes
+plane <- c(1000, 1000)
+x = plane[1] * runif(am@Dim[1])
+y = plane[2] * runif(am@Dim[1])
+# Add spacial positions, hub distance and degree information to the nodes.
+hub_id <- which.max(degree(g))
+
+cra_graph_actor_conflict <- 
+  cra_graph_actor_conflict %>%
+  activate(nodes) %>%
+  mutate(
+    x = x,
+    y = y, 
+#    hub_dist = replace_na(bfs_dist(root = hub_id), Inf),
+    degree = degree(g),
+#    friends_of_friends = replace_na(local_ave_degree(), 0),
+    centrality = centrality_authority(),
+    cluster = as.factor(group_infomap(trials = 5))
+  )
+
+cra_graph_actor_conflict %>%
+  ggraph(layout = "kk") +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA), color = cluster)) + 
+   geom_node_point(aes(size = centrality, color = cluster), alpha = .5) +
+ # scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  geom_edge_diagonal(color = "blue", alpha = 0.6) +
+  coord_fixed() +
+  guides(size = FALSE, color = FALSE)
+
+
+
+actors_violent_conf_14_20 <-
+actors_violent_conf_14_20 %>%
+  mutate(from = case_when(str_detect(from, "APRD") ~ "APRD",
+                          str_detect(from, "UFDR") ~ "UFDR",
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "CPC") ~ "CPC",
+                          
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "UPC") ~ "UPC",
+                          str_detect(from, "MPC") ~ "MPC",
+                          str_detect(from, "MINUSCA") ~ "MINUSCA",
+                          str_detect(from, "LRA") ~ "LRA",
+                          str_detect(from, "Unidentified") ~ "UAG",
+                          str_detect(from, "FPRC") ~ "FPRC",
+                          str_detect(from, "Military Forces") ~ "CAR Military",
+                          str_detect(from, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(from, "RJ: Revolution and Justice") ~ "RJ",
+                          str_detect(from, "RRR") ~ "RRR",
+                          TRUE ~ from),
+         to = case_when(str_detect(to, "APRD") ~ "APRD",
+                        str_detect(to, "UFDR") ~ "UFDR",
+                        str_detect(to, "CPC") ~ "CPC",
+                          str_detect(to, "UPC") ~ "UPC",
+                          str_detect(to, "MPC") ~ "MPC",
+                          str_detect(to, "MINUSCA") ~ "MINUSCA",
+                          str_detect(to, "LRA") ~ "LRA",
+                          str_detect(to, "Unidentified") ~ "UAG",
+                          str_detect(to, "FPRC") ~ "FPRC",
+                          str_detect(to, "Military Forces") ~ "CAR Military",
+                          str_detect(to, "RRR") ~ "RRR",
+                          str_detect(to, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(to, "RJ: Revolution and Justice") ~ "RJ",
+                          TRUE ~ to)
+         )
+
+g <- graph_from_data_frame(actors_violent_conf_14_20)
+am <- as_adjacency_matrix(g)
+
+# Create Igraph object
+g <- graph_from_adjacency_matrix(am, mode="undirected")
+# Make a tidygraph object from it. Igraph methods can still be called on it.
+cra_graph_actor_conflict <- as_tbl_graph(g)
+
+
+library(ggraph)
+# random numbers for placement of nodes
+plane <- c(1000, 1000)
+x = plane[1] * runif(am@Dim[1])
+y = plane[2] * runif(am@Dim[1])
+# Add spacial positions, hub distance and degree information to the nodes.
+hub_id <- which.max(degree(g))
+
+cra_graph_actor_conflict <- 
+  cra_graph_actor_conflict %>%
+  activate(nodes) %>%
+  mutate(
+    x = x,
+    y = y, 
+#    hub_dist = replace_na(bfs_dist(root = hub_id), Inf),
+    degree = degree(g),
+#    friends_of_friends = replace_na(local_ave_degree(), 0),
+    centrality = centrality_authority(),
+    cluster = as.factor(group_infomap(trials = 5))
+  )
+
+cra_graph_actor_conflict %>%
+  ggraph(layout = "kk") +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA), color = cluster)) + 
+   geom_node_point(aes(size = centrality, color = cluster), alpha = .5) +
+ # scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  geom_edge_diagonal(color = "blue", alpha = 0.6) +
+  coord_fixed() +
+  guides(size = FALSE, color = FALSE)
+
+
+
+actors_violent_conf_21_pres <-
+actors_violent_conf_21_pres %>%
+  mutate(from = case_when(str_detect(from, "APRD") ~ "APRD",
+                          str_detect(from, "UFDR") ~ "UFDR",
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "CPC") ~ "CPC",
+                          
+                          str_detect(from, "CPC") ~ "CPC",
+                          str_detect(from, "UPC") ~ "UPC",
+                          str_detect(from, "MPC") ~ "MPC",
+                          str_detect(from, "MINUSCA") ~ "MINUSCA",
+                          str_detect(from, "LRA") ~ "LRA",
+                          str_detect(from, "Unidentified") ~ "UAG",
+                          str_detect(from, "FPRC") ~ "FPRC",
+                          str_detect(from, "Military Forces") ~ "CAR Military",
+                          str_detect(from, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(from, "RJ: Revolution and Justice") ~ "RJ",
+                          str_detect(from, "RRR") ~ "RRR",
+                          TRUE ~ from),
+         to = case_when(str_detect(to, "APRD") ~ "APRD",
+                        str_detect(to, "UFDR") ~ "UFDR",
+                        str_detect(to, "CPC") ~ "CPC",
+                          str_detect(to, "UPC") ~ "UPC",
+                          str_detect(to, "MPC") ~ "MPC",
+                          str_detect(to, "MINUSCA") ~ "MINUSCA",
+                          str_detect(to, "LRA") ~ "LRA",
+                          str_detect(to, "Unidentified") ~ "UAG",
+                          str_detect(to, "FPRC") ~ "FPRC",
+                          str_detect(to, "Military Forces") ~ "CAR Military",
+                          str_detect(to, "RRR") ~ "RRR",
+                          str_detect(to, "Fulani Ethnic Militia") ~ "Fulani Ethnic Mil.",
+                          str_detect(to, "RJ: Revolution and Justice") ~ "RJ",
+                          TRUE ~ to)
+         )
+
+actors_violent_conf_21_pres <-
+actors_violent_conf_21_pres %>%
+  dplyr::filter(to != "Civilians (Chad)", 
+                from  != "Civilians (Chad)")
+
+g <- graph_from_data_frame(actors_violent_conf_21_pres)
+am <- as_adjacency_matrix(g)
+
+# Create Igraph object
+g <- graph_from_adjacency_matrix(am, mode="undirected")
+# Make a tidygraph object from it. Igraph methods can still be called on it.
+cra_graph_actor_conflict <- as_tbl_graph(g)
+
+
+library(ggraph)
+# random numbers for placement of nodes
+plane <- c(1000, 1000)
+x = plane[1] * runif(am@Dim[1])
+y = plane[2] * runif(am@Dim[1])
+# Add spacial positions, hub distance and degree information to the nodes.
+hub_id <- which.max(degree(g))
+
+cra_graph_actor_conflict <- 
+  cra_graph_actor_conflict %>%
+  activate(nodes) %>%
+  mutate(
+    x = x,
+    y = y, 
+#    hub_dist = replace_na(bfs_dist(root = hub_id), Inf),
+    degree = degree(g),
+#    friends_of_friends = replace_na(local_ave_degree(), 0),
+    centrality = centrality_authority(),
+    cluster = as.factor(group_infomap(trials = 2))
+  )
+
+cra_graph_actor_conflict %>%
+  ggraph(layout = "kk") +
+  geom_node_text(aes(label=ifelse(centrality > .2, name, NA))) + 
+   geom_node_point(aes(size = centrality), alpha = .5, color = "red") +
+ # scale_color_gradient(low = "dodgerblue2", high = "firebrick4") +
+  geom_edge_fan(color = "blue", alpha = 0.4) +
+  coord_fixed() +
+  guides(size = FALSE, color = FALSE)
+
+
+```
+
+```{r models_prep, echo=FALSE, warning=FALSE, message = FALSE}
+cra_adm2 <- sf::read_sf("C:/Users/jparr/OneDrive - DAI/ACLED/Conflict/CRA/caf_admbnda_adm2_200k_sigcaf_reach_itos_v2/caf_admbnda_adm2_200k_sigcaf_reach_itos_v2.shp")
+
+cra_spatial <- sf::read_sf(paste0(getwd(), "/", "cra_spatial.shp"))
+cra_conflict <- st_as_sf(cra_conflict, coords = c("longitude", "latitude"))
+
+st_crs(cra_conflict) <- st_crs(cra_spatial)
+cra_conflict <- sf::st_intersection(cra_conflict, cra_spatial[,c("admin2Name", "dist", "r_tri", "nl", "ndvi")])
+
+
+
+```
+
+
+```{r models_prep2, echo=FALSE, warning=FALSE, message = FALSE}
+# Anti-Balaka
+# Seleka Militia
+# Wagner Group
+# LRA: Lords Resistance Army
+# CPC: Coalition of Patriots for Change
+cra_conflict <- cra_conflict %>%
+  dplyr::mutate(anti_balaka = ifelse(actor1 == "Anti-Balaka"|actor2 == "Anti-Balaka", 1, 0),
+                seleka = ifelse(actor1 == "Seleka Militia"|actor2 == "Seleka Militia", 1, 0),
+                lra = ifelse(actor1 == "LRA: Lords Resistance Army"|actor2 == "LRA: Lords Resistance Army", 1, 0),
+                wagner = ifelse(actor1 == "Wagner Group"|actor2 == "Wagner Group", 1, 0),
+                cpc = ifelse(actor1 == "CPC: Coalition of Patriots for Change"|actor2 == "CPC: Coalition of Patriots for Change", 1, 0),
+                )
+```
+
+```{r models_antibalaka, echo=FALSE, warning=FALSE, message = FALSE}
+cra_agg_year_adm2 <- 
+  cra_conflict %>%
+  dplyr::group_by(year, admin2Name) %>%
+  summarize(anti_balaka = sum(anti_balaka, na.rm = T)) %>%
+  dplyr::mutate(anti_balaka_bin = ifelse(anti_balaka >= 1, 1, 0)) 
+
+cra_agg_year_adm2 <-
+  cra_agg_year_adm2 %>%
+  ungroup() %>%
+  tidyr::complete(admin2Name, year) %>%
+  dplyr::select(-geometry) 
+
+
+cra_conflict <- sf::st_intersection(cra_conflict, cra_spatial[,c("admin2Name", "dist", "r_tri", "nl", "ndvi")])
+
+
+```
+
+```{r models_wagner, cols.print = 12, rows.print = 15, echo=FALSE, warning=FALSE, message = FALSE}
+### Conflict against Civilians - Wagner Group
+
+
+
+cra_wagner_agg_year_adm2 <- 
+  cra_conflict %>%
+  st_drop_geometry() %>%
+  dplyr::filter(actor1 == "Civilians (Central African Republic)"|actor2 == "Civilians (Central African Republic)") %>%
+  dplyr::group_by(year, admin2Name) %>%
+  summarize(wagner = sum(wagner, na.rm = T)) %>%
+  dplyr::mutate(wagner_bin = ifelse(wagner >= 1, 1, 0)) %>%
+  ungroup() %>%
+  tidyr::complete(admin2Name, year)
+
+
+cra_wagner_agg_year_adm2$wagner <- ifelse(is.na(cra_wagner_agg_year_adm2$wagner), 0, cra_wagner_agg_year_adm2$wagner)
+
+cra_wagner_agg_year_adm2$wagner_bin <- ifelse(is.na(cra_wagner_agg_year_adm2$wagner_bin), 0, cra_wagner_agg_year_adm2$wagner_bin)
+
+cra_wagner_agg_year_adm2 <- cra_wagner_agg_year_adm2 %>% left_join(cra_adm2)
+
+
+
+cra_wagner_agg_year_adm2 <- sf::st_as_sf(cra_wagner_agg_year_adm2)
+
+cra_wagner_agg_year_adm2 %>% 
+  st_drop_geometry() %>%
+  dplyr::filter(year > "2018" & year < "2022") %>%
+  dplyr::group_by(year) %>%
+  summarize(sum(wagner, na.rm = T))
+
+wag_2021 <- cra_wagner_agg_year_adm2 %>% 
+  st_drop_geometry() %>%
+  dplyr::filter(year > "2020" & year < "2022") %>%
+  dplyr::group_by(year, admin1Name, admin2Name) %>%
+  summarize(wagner_violent_events = sum(wagner, na.rm = T)) %>%
+  arrange(desc(wagner_violent_events))
+
+ggplot(data = cra_wagner_agg_year_adm2 %>%
+  dplyr::filter(year > "2019" & year < "2022")) + 
+  geom_sf() +
+  geom_sf(aes(fill=wagner), color=gray(.5)) +
+  scale_fill_viridis(
+  alpha = 1,
+#  begin = 0,
+#  end = 1,
+  direction = 1,
+  discrete = FALSE,
+  option = "C") +
+  facet_wrap(. ~ year) +
+  ggthemes::theme_fivethirtyeight() +
+   theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank(), #remove x axis ticks
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank(),  #remove y axis ticks
+        plot.title = element_text(size = 13)
+        ) +
+  guides(fill=guide_legend(title="Number of Violent Events")) +
+  ggtitle("Violence Against Civilians Attributed to Wagner Group by Year")
+  
+
+
+```
+
+```{r models_cpc, cols.print = 12, rows.print = 15, echo=FALSE, warning=FALSE, message = FALSE}
+### Conflict against Civilians - CPC
+
+
+
+cra_cpc_agg_year_adm2 <- 
+  cra_conflict %>%
+  st_drop_geometry() %>%
+  dplyr::filter(actor1 == "Civilians (Central African Republic)"|actor2 == "Civilians (Central African Republic)") %>%
+  dplyr::group_by(year, admin2Name) %>%
+  summarize(cpc = sum(cpc, na.rm = T)) %>%
+  dplyr::mutate(cpc_bin = ifelse(cpc >= 1, 1, 0)) %>%
+  ungroup() %>%
+  tidyr::complete(admin2Name, year)
+
+
+cra_cpc_agg_year_adm2$cpc <- ifelse(is.na(cra_cpc_agg_year_adm2$cpc), 0, cra_cpc_agg_year_adm2$cpc)
+
+cra_cpc_agg_year_adm2$cpc_bin <- ifelse(is.na(cra_cpc_agg_year_adm2$cpc_bin), 0, cra_cpc_agg_year_adm2$cpc_bin)
+
+cra_cpc_agg_year_adm2 <- cra_cpc_agg_year_adm2 %>% left_join(cra_adm2)
+
+
+
+cra_cpc_agg_year_adm2 <- sf::st_as_sf(cra_cpc_agg_year_adm2)
+
+cra_cpc_agg_year_adm2 %>% 
+  st_drop_geometry() %>%
+  dplyr::filter(year > "2018" & year < "2022") %>%
+  dplyr::group_by(year) %>%
+  summarize(sum(cpc, na.rm = T))
+
+cpc_2021 <- cra_cpc_agg_year_adm2 %>% 
+  st_drop_geometry() %>%
+  dplyr::filter(year > "2020" & year < "2022") %>%
+  dplyr::group_by(year, admin1Name, admin2Name) %>%
+  summarize(cpc_violent_events = sum(cpc, na.rm = T)) %>%
+  arrange(desc(cpc_violent_events))
+
+ggplot(data = cra_cpc_agg_year_adm2 %>%
+  dplyr::filter(year > "2019" & year < "2022")) + 
+  geom_sf() +
+  geom_sf(aes(fill=cpc), color=gray(.5)) +
+  scale_fill_viridis(
+  alpha = 1,
+#  begin = 0,
+#  end = 1,
+  direction = 1,
+  discrete = FALSE,
+  option = "C") +
+  facet_wrap(. ~ year) +
+  ggthemes::theme_fivethirtyeight() +
+   theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank(), #remove x axis ticks
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank(),  #remove y axis ticks
+        plot.title = element_text(size = 13)
+        ) +
+  guides(fill=guide_legend(title="Number of Violent Events")) +
+  ggtitle("Violence Against Civilians Attributed to CPC by Year")
+  
+cra_cpc_agg_year_adm2_spatial <- 
+  cra_cpc_agg_year_adm2 %>%
+  st_join(cra_spatial)
+
+summary(glm(cpc_bin ~ dist + r_tri + nl + ndvi, data = cra_cpc_agg_year_adm2_spatial))
+
+```
+
+
+
+```{r extra_analysis, cols.print = 12, rows.print = 12, echo=FALSE, warning=FALSE, message = FALSE}
+
+
+cra_conflict %>%
+  sf::st_drop_geometry() %>%
+  dplyr::group_by(Year = year) %>%
+  dplyr::summarize(Total_Events = n(), 
+                   Total_Fatalities = sum(fatalities, na.rm = T)) %>%
+  dplyr::filter(Year > 2010) %>%
+  dplyr::mutate_all(dplyr::funs(as.numeric(.))) 
+
+cpc_2021 %>%
+  left_join(wag_2021) %>%
+  ungroup() %>%
+  dplyr::select(cpc_violent_events, wagner_violent_events) %>%
+  cor(.) 
+  
+library(ggpubr)
+cpc_2021 %>%
+  left_join(wag_2021) %>%
+  ggplot(., aes(x = cpc_violent_events, y = wagner_violent_events)) +
+  geom_point() +
+  geom_text_repel(aes(label = ifelse(cpc_violent_events > 10 | wagner_violent_events > 10, admin2Name, NA))) +
+  geom_smooth(method = "lm") +
+#  geom_text(label = "r = .68", aes(x = 20, y = 15), color = "red") +
+  stat_cor(method = "pearson", label.x = 20, label.y = 15) +
+  ggthemes::theme_fivethirtyeight() +
+   theme(axis.title.x= element_text(size = 6),
+         plot.title = element_text(size=13),
+         axis.title.y= element_text(size = 6)
+        ) +
+  xlab("Violent Events Attributed to CPC") +
+  ylab("Violent Events Attributed to Wagner Group") +
+  ggtitle("Relationship of Violence against Civilians by Wagner Group and CPC at Subprefecture Level")
+
+ 
+cra_conflict %>%
+  dplyr::filter(year >= "2019") %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::mutate(mining = ifelse(str_detect(notes, "gold|ore|diamond|mining|mine|copper|diamond|gold|graphite|ilmenite|iron ore|kaolin|kyanite|lignite|limestone|manganese|monazite|quartz|rutile|salt|uranium"), 1, 0)) %>%
+  group_by(admin1) %>%
+  summarize(events = n(), 
+            mining = sum(mining, na.rm = T),
+            fatalities = sum(fatalities, na.rm = T)) %>%
+  st_drop_geometry() %>%
+  dplyr::mutate(pct_mining = mining/events) %>%
+  arrange(desc(pct_mining)) %>%
+  dplyr::select(fatalities, pct_mining) %>%
+  cor(.)
+ 
+cra_conflict %>%
+  dplyr::filter(year >= "2019") %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::mutate(mining = ifelse(str_detect(notes, "gold|ore|diamond|mining|mine|copper|diamond|gold|graphite|ilmenite|iron ore|kaolin|kyanite|lignite|limestone|manganese|monazite|quartz|rutile|salt|uranium"), 1, 0)) %>%
+  group_by(admin1) %>%
+  summarize(events = n(), 
+            mining = sum(mining, na.rm = T),
+            fatalities = sum(fatalities, na.rm = T)) %>%
+  st_drop_geometry() %>%
+  dplyr::mutate(pct_mining = mining/events) %>%
+  arrange(desc(pct_mining)) %>%
+  ggplot(., aes(x = fatalities, y = pct_mining)) +
+  geom_point() +
+  geom_text_repel(aes(label = ifelse(fatalities > 200, admin1, NA))) +
+  geom_smooth(method = "lm") +
+#  geom_text(label = "r = .68", aes(x = 20, y = 15), color = "red") +
+  stat_cor(method = "pearson", label.x = 20, label.y = .15) +
+  ggthemes::theme_fivethirtyeight() +
+   theme(axis.title.x= element_text(size = 10),
+         plot.title = element_text(size=11),
+         axis.title.y= element_text(size = 10)
+        ) +
+  xlab("Fatalities") +
+  ylab("Percent of Events Mentioning Mining Activities") +
+  ggtitle("Mining Activities and Total Number of Fatalities among Prefectures since 2020")
+ 
+ 
+                
+
+cra_conflict %>%
+  dplyr::filter(year >= "2019") %>%
+  dplyr::filter(fatalities > 0) %>%
+  dplyr::mutate(mining = ifelse(str_detect(notes, "gold|ore|diamond|mining|mine|copper|diamond|gold|graphite|ilmenite|iron ore|kaolin|kyanite|lignite|limestone|manganese|monazite|quartz|rutile|salt|uranium"), 1, 0)) %>%
+  group_by(admin2) %>%
+  summarize(events = n(), 
+            mining = sum(mining, na.rm = T),
+            fatalities = sum(fatalities, na.rm = T)) %>%
+  st_drop_geometry() %>%
+  dplyr::mutate(pct_mining = mining/events) %>%
+  arrange(desc(pct_mining)) %>%
+  ggplot(., aes(x = fatalities, y = pct_mining)) +
+  geom_point() +
+  geom_text_repel(aes(label = ifelse(fatalities > 200, admin2, NA))) +
+  geom_smooth(method = "lm") +
+#  geom_text(label = "r = .68", aes(x = 20, y = 15), color = "red") +
+  stat_cor(method = "pearson", label.x = 20, label.y = .15) +
+  ggthemes::theme_fivethirtyeight() +
+   theme(axis.title.x= element_text(size = 10),
+         plot.title = element_text(size=11),
+         axis.title.y= element_text(size = 10)
+        ) +
+  xlab("Fatalities") +
+  ylab("Percent of Events Mentioning Mining Activities") +
+  ggtitle("Mining Activities and Total Number of Fatalities among Subprefectures since 2020")
+
+
+```

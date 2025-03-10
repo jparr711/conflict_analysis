@@ -1,0 +1,1544 @@
+---
+title: "Colombia - ACLED"
+author: "CDA"
+date: "3/31/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, echo=FALSE, warning=FALSE, message = FALSE, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(readstata13)
+library(tidyverse)
+library(xlsx)
+library(RColorBrewer)
+library(ggstatsplot)
+library(sjPlot)
+library(psych)
+library(broom)
+library(timeSeries)
+library(data.table)
+library(ggplot2)
+library(sjmisc)
+library(expss) 
+library(lubridate)
+library(scales)
+library(corrplot)
+library(MASS)
+library(reshape2)
+library(ggridges)
+library(grid)
+library(ggrepel)
+library(countrycode)
+library(WDI)
+library(ggthemes)
+library(directlabels)
+library(fuzzyjoin)
+library(vtable)
+library(haven)
+library(lme4)
+library(brms)
+library(acled.api)
+library(tseries)
+library(sf)
+library(xts)
+library(GGally)
+library(MLmetrics)
+library(pROC)
+
+library(glmnet)
+library(caret)
+library(Metrics)
+library(yardstick)
+library(gbm)
+library(nnet)
+library(themis)
+library(randomForest)
+
+require(tidymodels)
+require(tidyposterior)
+require(tsibble)  #tsibble for time series based on tidy principles
+require(fable)  #for forecasting based on tidy principles
+require(ggfortify)  #for plotting timeseries
+require(forecast)  #for forecast function
+library(fpp2)
+require(chron)
+require(zoo)
+require(lmtest)
+require(TTR)  #for smoothing the time series
+```
+
+
+```{r acled_api, echo=FALSE, warning=FALSE, message = FALSE}
+colombia_conflict <- acled.api( # stores an ACLED sample in object my.data.frame
+  email.address = "jamie_parr@dai.com",
+  access.key = "q9ByJkq9*sNQS8NkJNL0",
+  region = "South America",
+  country = c("Colombia"), 
+  all.variables = TRUE,
+  start.date = "2017-01-01", 
+  end.date = Sys.Date())
+
+col_adm2 <- read_sf("col_second_level_admin_boundaries/col_second_level_admin_boundaries.shp")
+col_pred_covars <- read_csv("col_pred_covars.csv")
+
+col_pred_covars <- col_pred_covars %>%
+  dplyr::select(-geometry)
+
+col_pred_covars <- col_pred_covars %>%
+  left_join(col_adm2 %>% dplyr::select(OBJECTID, MPIO_CCDGO, MPIO_NAREA, 
+                                       SHAPE_Leng, SHAPE_Area, geometry), by = c("div_code2" = "MPIO_CCDGO"))
+
+colombia_conflict <- st_as_sf(colombia_conflict, coords = c("longitude", "latitude"))
+col_pred_covars <- st_as_sf(col_pred_covars)
+
+st_crs(colombia_conflict) <- st_crs(col_pred_covars)
+colombia_conflict <- sf::st_intersection(colombia_conflict, col_pred_covars[,"div_code2"])
+
+
+colombia_conflict <- 
+  colombia_conflict %>%
+  st_drop_geometry 
+
+# global env save up to here  
+colombia_conflict <- 
+  colombia_conflict %>%
+  full_join(col_pred_covars[, "div_code2"] %>% st_drop_geometry, by = "div_code2") %>%
+  ungroup() %>%
+  dplyr::mutate(event_date = ifelse(is.na(event_date), "2018-01-01", event_date),
+                event_date =  as.Date(event_date)) %>%
+  tidyr::complete(div_code2, event_date = seq.Date(min(event_date), max(event_date), by = "day")) %>%
+  ungroup()
+
+
+colombia_conflict <- 
+  colombia_conflict %>%
+  full_join(col_pred_covars %>% st_drop_geometry, by = "div_code2")
+
+
+colombia_conflict <-
+colombia_conflict %>%
+  dplyr::mutate(econ_region = case_when(admin1 == "Bogota, D.C." ~ "Bogota",
+                                   admin1 == "Guainia" ~      "Amazónica",
+                                   admin1 == "Amazonas" ~     "Amazónica",
+                                   admin1 == "Boyaca" ~       "Andina",
+                                   admin1 == "Casanare" ~     "Orinoquia",
+                                   admin1 == "Santander" ~     "Andina",
+                                   
+                                   admin1 == "Norte de Santander" ~ "Andina",
+                                   admin1 == "Vaupes" ~             "Amazónica",
+                                   admin1 == "La Guajira" ~         "Caribe",
+                                   admin1 == "Antioquia" ~          "Andina",
+                                   admin1 == "Caqueta" ~            "Amazónica",
+                                   admin1 == "Tolima" ~             "Andina",
+                                   
+                                   admin1 == "Choco" ~        "Pacifica",
+                                   admin1 == "Arauca" ~       "Orinoquia",
+                                   admin1 == "Vichada" ~      "Orinoquia",
+                                   admin1 == "Cesar" ~        "Caribe",
+                                   admin1 == "Cundinamarca" ~ "Andina",
+                                   
+                                   admin1 == "Huila" ~       "Andina",
+                                   admin1 == "Quindio" ~     "Andina",
+                                   admin1 == "Guaviare" ~     "Amazónica",
+                                   admin1 == "Valle del Cauca" ~ "Pacifica",
+                                   admin1 == "Cauca" ~     "Pacifica",
+                                   
+                                   admin1 == "Narino" ~    "Pacifica",
+                                   admin1 == "Bolivar" ~   "Caribe",
+                                   admin1 == "Meta" ~      "Orinoquia",
+                                   admin1 == "Atlantico" ~ "Caribe",
+                                   admin1 == "Putumayo" ~  "Amazónica",
+                                   
+                                   admin1 == "Magdalena" ~                "Caribe",
+                                   admin1 == "Sucre" ~                    "Caribe",
+                                   admin1 == "Caldas" ~                   "Andina",
+                                   admin1 == "Cordoba" ~                  "Caribe",
+                                   admin1 == "Risaralda" ~                "Andina",
+                                   admin1 == "San Andres y Providencia" ~ "Insular"
+                                   ))
+
+colombia_conflict <- colombia_conflict %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities),
+                one_fat = ifelse(fatalities > 0, 1, 0),
+                pib_pc_2020 = (pib_2020/pob_2018) * 1000, 
+                pob_dens_2018 = pob_2018/MPIO_NAREA) %>%
+  dplyr::group_by(div_code2, year) %>%
+  dplyr::mutate(five_fat = sum(fatalities >= 1, na.rm = TRUE))
+
+
+
+
+colombia_conflict$year = lubridate::year(colombia_conflict$event_date)
+colombia_conflict$yday = yday(colombia_conflict$event_date)
+colombia_conflict$quarter = quarter(colombia_conflict$event_date)
+colombia_conflict$month = lubridate::month(colombia_conflict$event_date)
+colombia_conflict$day = lubridate::day(colombia_conflict$event_date)
+
+colombia_conflict$split_dummy <- sample(c(rep("TRAIN", (0.7 * nrow(colombia_conflict))),
+                        rep("TEST", 0.3 * nrow(colombia_conflict))))
+
+
+
+
+
+```
+
+
+```{r timeSeries, echo=FALSE, warning=FALSE, message = FALSE}
+
+cc_daily_mun <- 
+  colombia_conflict %>%
+  dplyr::group_by(div_code2, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) 
+
+cc_daily_mun <-
+  cc_daily_mun %>%
+  mutate(event_date = as.Date(event_date))
+
+cc_daily <-  
+cc_daily_mun %>%
+  dplyr::select(-contains("div_code")) %>%
+  group_by(date = event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  dplyr::mutate(date = as.Date(date), 
+                fatalities =ifelse(is.na(fatalities), 0, fatalities))
+
+cc_daily %>%  
+  ggplot(., aes(x = date, y = fatalities))  +
+  geom_line()+
+  xlab("Year") +
+  ylab("Fatalities")
+
+autoplot(ts(diff(cc_daily$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Day") +
+  ggtitle("Day to Day Change in Fatalities")
+  
+cc_agg_monthly <-
+colombia_conflict %>%
+  dplyr::select(-div_code2) %>%
+  group_by(year, month) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(date = as.yearmon(paste(year, month), "%Y %m")) %>%
+  dplyr::select(-year, -month) %>%
+  as.data.frame()
+
+# as.POSIXct(d, format = '%Y-%m-%d') 
+# cc_agg <- xts(cc_agg$fatalities, cc_agg$date)
+
+# cc_agg <- ts(cc_agg$fatalities, start = min(cc_agg$date), end = max(cc_agg$date), frequency = 1)
+
+cc_agg_year <- 
+  cc_daily %>%
+  dplyr::mutate(year = lubridate::year(date)) %>%
+  dplyr::group_by(year) %>%
+  summarize(fatalities = sum(fatalities, na.rm = T))
+
+ggseasonplot(ts(cc_agg_monthly$fatalities, frequency = 12, start = c(2018, 4), end = c(2022, 4)), year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("Fatalities") +
+  ggtitle("Colombia: Fatalities by Month")
+
+autoplot(ts(diff(cc_agg_monthly$fatalities))) +
+  ylab("Change in Fatalities") +
+  xlab("Days") +
+  ggtitle("Month to Month Change in Fatalities")
+
+
+cc_d7 <- 
+  cc_daily %>%
+  dplyr::mutate(wday = wday(as.Date(date)),
+                year = year(date)) %>%
+  dplyr::group_by(wday, year) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T))
+
+ggplot(cc_d7, aes(x = wday, y = fatalities, color = factor(year))) +
+  geom_line() +
+  ylab("Fatalities") +
+  xlab("Day of Week") +
+  labs(color = "Year") +
+  ggtitle("Colombia: Fatalities by Day of Week")
+
+cc_agg_year_mun <- 
+  colombia_conflict %>%
+  dplyr::group_by(div_code2) %>%
+  dplyr::mutate(index = cur_group_id()) %>%
+  dplyr::mutate(year = year(event_date),
+                fatalities = ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::group_by(year, div_code2) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) 
+
+ggplot(cc_agg_year_mun, aes(x = year, y = fatalities, color = div_code2)) +
+  geom_line() +
+  theme(legend.position = 'none') +
+  ggtitle("Yearly Trend in Fatalities by Municipality")
+
+ggAcf(ts(cc_d7$fatalities, frequency = 4, start = c(2018, 1), end = c(2022, 1) ))
+ggAcf(ts(cc_agg_monthly$fatalities, frequency = 12, start = 2018, end = 2022))
+
+
+colombia_conflict %>%
+  dplyr::group_by(dept_name, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = dept_name)) +
+  geom_line() +
+  facet_wrap(. ~ dept_name) +
+  theme(legend.position = "none")
+
+
+colombia_conflict %>%
+  dplyr::group_by(econ_region, event_date) %>%
+  dplyr::summarize(fatalities = sum(fatalities)) %>%
+  mutate(event_date = as.Date(event_date)) %>%
+  complete(event_date = seq.Date(min(event_date), max(event_date), by="day")) %>%
+  dplyr::mutate(fatalities =ifelse(is.na(fatalities), 0, fatalities)) %>%
+  dplyr::filter(!is.na(econ_region)) %>%
+  ggplot(., aes(x = event_date, y = fatalities, color = econ_region)) +
+  geom_line() +
+  facet_wrap(. ~ econ_region) +
+  theme(legend.position = "none")
+
+
+
+
+auto.arima(ts(cc_agg_monthly$fatalities, frequency = 52))
+auto.arima(ts(cc_agg_monthly$fatalities, frequency = 52), trace = T)
+auto.arima(ts(cc_agg_monthly$fatalities, frequency = 52), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+mon_fat_arima = arima(ts(cc_agg_monthly$fatalities, frequency = 52), order = c(0,1,1))
+mon_fat_arima
+
+tail(ts(cc_agg_monthly$fatalities, frequency = 52))
+residuals(mon_fat_arima)
+
+arimafore <- forecast(mon_fat_arima, h = 12)
+autoplot(arimafore)
+
+
+auto.arima(ts(diff(cc_daily$fatalities), frequency = 1572))
+auto.arima(ts(diff(cc_daily$fatalities), frequency = 1572), trace = T)
+auto.arima(ts(diff(cc_daily$fatalities), frequency = 1572), trace = T, 
+           stepwise = F, 
+           approximation = F)
+
+daily_fat_arima = arima(ts(diff(cc_daily$fatalities), frequency = 1572), order = c(4,0,1))
+daily_fat_arima
+
+tail(ts(diff(cc_daily$fatalities), frequency = 1572))
+residuals(daily_fat_arima)
+
+arimafore <- forecast(daily_fat_arima, h = 365)
+autoplot(arimafore)
+
+
+plot(forecast( ets(cc_daily$fatalities), h = 365))
+
+cc_monthly_mun <- 
+  colombia_conflict %>%
+  dplyr::group_by(div_code2, year, month) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(date = as.yearmon(paste(year, month), "%Y %m")) %>%
+  dplyr::select(-year, -month) %>%
+  as.data.frame() %>%
+  dplyr::left_join(col_pred_covars, by = c("div_code2"))
+
+
+cc_monthly_mun$split_dummy <- ifelse(cc_monthly_mun$date >= "Dec 2021", "TEST", "TRAIN")
+
+cc_monthly_mun <- cc_monthly_mun %>% 
+  dplyr::select(date, div_code2, dept_name, nl,ndvi,r_tri,dist,nat_des,etn_grp_pct,div_index,voto_dc_pres_pv,voto_ch_pres_pv, sv_comp, prob_ratio_index, balance_primario, dependencia_transferencia, ahorro_corriente, educ_level_yngml, nitrab_niestud, pct_est_1, Ven_Migrants_per_mil_inh_2019, NBI_Proportion_2018, contains("fat"), split_dummy)
+
+# fix missing values
+# Mapiripana was assigned the same pib per capita as Barrancominas as it was integrated into it in 2019.
+cc_monthly_mun$pib_pc_2020[cc_monthly_mun$div_code2 == 94663] <- cc_monthly_mun$pib_pc_2020[cc_monthly_mun$div_code2 == 94343]
+# Calculated hard coding looking at spreadsheet (had error)
+cc_monthly_mun$sv_comp[cc_monthly_mun$div_code2 == 47541] <- .49
+
+apply(is.na(cc_monthly_mun %>% dplyr::select(date, nl:NBI_Proportion_2018)), 2, which)
+
+apply(is.na(cc_monthly_mun %>% dplyr::select(dept_name)), 2, which)
+
+cc_monthly_dept <- cc_monthly_mun %>%
+  dplyr::group_by(dept_name, date) %>%
+  dplyr::summarize(fatalities = sum(fatalities, na.rm = T)) %>%
+  ungroup() 
+
+cc_monthly_dept_matrix <- cc_monthly_dept %>%
+  complete(dept_name, date) %>%
+  pivot_wider(names_from = "dept_name", values_from = "fatalities") %>%
+  dplyr::select(-date) %>%
+  as.ts(zooreg(.))
+
+library(hts)
+
+cc_monthly_dept_gts <- gts(cc_monthly_dept_matrix)
+cc_monthly_dept_gts %>% aggts(levels=0:1) %>%
+  autoplot(facet=TRUE) +
+  xlab("Month") + ylab("Deaths") + ggtitle("Deaths by Department")
+
+ccmg_forecast <- forecast(cc_monthly_dept_gts, method="bu", fmethod="arima")
+
+autoplot(ccmg_forecast)
+
+```
+
+```{r covars, echo=FALSE, warning=FALSE, message = FALSE}
+cc_agg_year_mun <- 
+  cc_agg_year_mun %>%
+  dplyr::left_join(colombia_conflict %>%
+                     dplyr::select(-fatalities) %>%
+                     dplyr::distinct(year, div_code2, .keep_all = T), by = c("div_code2", "year")) %>%
+  complete(year, div_code2)
+
+cc_agg_year_mun <- 
+  cc_agg_year_mun %>%
+  dplyr::mutate(fatalities = ifelse(is.na(fatalities), 0, fatalities),
+                one_fat = ifelse(fatalities > 0, 1, 0),
+                five_fat = ifelse(fatalities >= 5, 1, 0),
+                pib_pc_2020 = (pib_2020/pob_2018) * 1000, 
+                pob_dens_2018 = pob_2018/MPIO_NAREA) %>%
+  dplyr::mutate(fat_diff_year = tsibble::difference(fatalities)) %>%
+#  dplyr::group_by(year) %>%
+  dplyr::mutate(fat_sd_year = sd(fat_diff_year, na.rm = T)) %>% 
+  dplyr::group_by(div_code2) %>%
+  dplyr::mutate(fat_one_sd_inc = ifelse(diff(fatalities) > fat_sd_year, 1, 0 ))
+
+table(cc_agg_year_mun$one_fat, cc_agg_year_mun$year)
+table(cc_agg_year_mun$five_fat, cc_agg_year_mun$year)
+table(cc_agg_year_mun$fat_one_sd_inc, cc_agg_year_mun$year)
+
+
+
+ggplot(cc_agg_year_mun, 
+       aes(x = fatalities, 
+           fill = factor(year),
+           y = year,
+           group = factor(year),
+           height = ..density..)) +
+  geom_density_ridges2(alpha = 0.5, point_alpha=1,point_shape=21, stat = "density") +
+  ggthemes::theme_clean() +
+  xlim(c(0, 30))
+
+
+
+# geospatial
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, nl:ndvi) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(one_fat, nl:ndvi) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(five_fat, nl:ndvi) %>%
+  GGally::ggpairs(.)
+
+# demographic - race/ethnicity
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, indig_pct:div_index) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(one_fat, indig_pct:div_index) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(five_fat, indig_pct:div_index) %>%
+  GGally::ggpairs(.)
+
+# demographic - race/ethnicity
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, indig_pct:div_index) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(one_fat, indig_pct:div_index) %>%
+  GGally::ggpairs(.)
+# socioeconomic - poverty, labor part yng males, education levels, estrato, ven migrants, pib 
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, NBI_Proportion_2018, nitrab_niestud, educ_level_yngml,
+                pct_est_1, Educ_Abandonment_2018, Ven_Migrants_per_mil_inh_2019, pib_2020,
+                pob_2018, pib_pc_2020, pob_dens_2018) %>%
+  GGally::ggpairs(.)
+
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(five_fat, NBI_Proportion_2018, nitrab_niestud, educ_level_yngml,
+                pct_est_1, Educ_Abandonment_2018, Ven_Migrants_per_mil_inh_2019, 
+                pib_2020, pob_2018, pib_pc_2020, pob_dens_2018) %>%
+  GGally::ggpairs(.)
+
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(one_fat, NBI_Proportion_2018, nitrab_niestud, educ_level_yngml,
+                pct_est_1, Educ_Abandonment_2018, Ven_Migrants_per_mil_inh_2019, pib_2020,
+                pob_2018, pib_pc_2020, pob_dens_2018) %>%
+  GGally::ggpairs(.)
+
+# political
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, sv_comp, contains("voto"), prob_ratio_index) %>%
+  GGally::ggpairs(.)
+
+# disasters
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, land_dis:nat_des) %>%
+  GGally::ggpairs(.)
+
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, pers_nat_des:pers_wind) %>%
+  GGally::ggpairs(.)
+
+# fiscal
+cc_agg_year_mun %>% ungroup() %>%
+  dplyr::select(fatalities, balance_primario:ahorro_corriente) %>%
+  GGally::ggpairs(.)
+
+
+```
+
+
+```{r one_fat_modeling, warning=FALSE, echo=FALSE, message = FALSE}
+# lasso, rf, gradient boosting machines, neural networks
+
+cc_agg_year_mun$split_dummy <- ifelse(cc_agg_year_mun$year == "2021"|cc_agg_year_mun$year == "2022", "TEST", "TRAIN")
+
+cc_agg_year_mun <- cc_agg_year_mun %>% 
+  dplyr::select(year, div_code2, nl,ndvi,r_tri,dist,nat_des,etn_grp_pct,div_index,voto_dc_pres_pv,voto_ch_pres_pv, sv_comp, prob_ratio_index, pob_dens_2018, pib_pc_2020, balance_primario, dependencia_transferencia, ahorro_corriente, educ_level_yngml, nitrab_niestud, pct_est_1, Ven_Migrants_per_mil_inh_2019, NBI_Proportion_2018, contains("fat"), split_dummy)
+
+# fix missing values
+# Mapiripana was assigned the same pib per capita as Barrancominas as it was integrated into it in 2019.
+cc_agg_year_mun$pib_pc_2020[cc_agg_year_mun$div_code2 == 94663] <- cc_agg_year_mun$pib_pc_2020[cc_agg_year_mun$div_code2 == 94343]
+# Calculated hard coding looking at spreadsheet (had error)
+cc_agg_year_mun$sv_comp[cc_agg_year_mun$div_code2 == 47541] <- .49
+
+apply(is.na(cc_agg_year_mun %>% dplyr::select(one_fat, nl:NBI_Proportion_2018)), 2, which)
+
+# remove 2022 
+cc_agg_year_mun <- cc_agg_year_mun %>% dplyr::filter(year != 2022)
+
+colombia_conflict_train <- cc_agg_year_mun[cc_agg_year_mun$split_dummy == "TRAIN", ]
+colombia_conflict_test <- cc_agg_year_mun[cc_agg_year_mun$split_dummy == "TEST", ]
+
+
+#### random forest ####
+
+colombia_conflict_train$one_fat <- ifelse(colombia_conflict_train$one_fat == 1, "yes", "no")
+colombia_conflict_test$one_fat <- ifelse(colombia_conflict_test$one_fat == 1, "yes", "no")
+
+colombia_conflict_train$one_fat <- as.factor(as.character(colombia_conflict_train$one_fat))
+colombia_conflict_test$one_fat <- as.factor(as.character(colombia_conflict_test$one_fat))
+
+formreg <- one_fat ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018
+
+# full model only
+onefat_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",       # save preds for the optimal tuning parameter
+   classProbs = TRUE,  # class probs in addition to preds
+   summaryFunction = twoClassSummary
+   )
+
+onefat_rf <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   method = "rf",
+   metric = "ROC",
+   tuneGrid = expand.grid(mtry = 1:10), # searching around mtry=4
+   trControl = onefat_trControl
+)
+
+onefat_rf
+
+plot(onefat_rf)
+
+
+
+onefat_preds_rf <- bind_cols(
+   predict(onefat_rf, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(onefat_rf, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$one_fat
+)
+
+confmat_onefat <- confusionMatrix(onefat_preds_rf$Predicted, reference = colombia_conflict_test$one_fat)
+confmat_onefat
+
+
+onefatrf_auc <- Metrics::auc(actual = onefat_preds_rf$Actual == "yes", onefat_preds_rf$yes)
+
+
+yardstick::roc_curve(onefat_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One Fatality RF ROC Curve",
+    subtitle = paste0("AUC = ", round(onefatrf_auc, 4))
+  )
+
+
+yardstick::gain_curve(onefat_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality RF Gain Curve")
+
+plot(caret::varImp(onefat_rf), main="Variable Importance with Random Forest")
+
+### lasso ####
+library(elasticnet)
+X <- model.matrix(formreg, data = colombia_conflict_train)[, -1]
+Y <- as.factor(colombia_conflict_train[["one_fat"]])
+# find MSE for lambda
+cvlasso <- cv.glmnet(X, as.numeric(Y), alpha = 1)
+plot(cvlasso)
+cvlasso
+
+(best.lambda <- cvlasso$lambda.min)
+
+onefat_lasso <- train(
+   x=X, y=Y, 
+   data = colombia_conflict_train, 
+   metric = "ROC",
+   method = 'glmnet', 
+   tuneGrid = expand.grid(alpha = 1, lambda = best.lambda),
+   trControl = onefat_trControl
+)
+
+
+onefat_lasso
+
+# plot(onefat_lasso)
+
+
+
+onefat_preds_lasso <- bind_cols(
+   predict(onefat_lasso, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(onefat_lasso, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$one_fat
+)
+
+confmat_onefat <- confusionMatrix(onefat_preds_lasso$Predicted, reference = colombia_conflict_test$one_fat)
+confmat_onefat
+
+
+onefatlasso_auc <- Metrics::auc(actual = onefat_preds_lasso$Actual == "yes", onefat_preds_lasso$yes)
+
+
+yardstick::roc_curve(onefat_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One Fatality Lasso ROC Curve",
+    subtitle = paste0("AUC = ", round(onefatlasso_auc, 4))
+  )
+
+
+yardstick::gain_curve(onefat_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality Lasso Gain Curve")
+
+plot(caret::varImp(onefat_lasso), main="Variable Importance with Lasso Regression")
+
+
+
+
+
+ols.model <- glm(as.numeric(one_fat) ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018, data=colombia_conflict_train)
+
+summary(ols.model)
+
+
+
+
+
+
+
+
+##### gradient boosting model#### 
+
+set.seed(1234)
+
+
+
+onefat_gbm <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = onefat_trControl
+)
+
+onefat_gbm
+
+plot(onefat_gbm)
+
+
+onefat_preds_gbm <- bind_cols(
+   predict(onefat_gbm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(onefat_gbm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$one_fat
+)
+
+confmat_onefat <- confusionMatrix(onefat_preds_gbm$Predicted, reference = colombia_conflict_test$one_fat)
+confmat_onefat
+
+
+onefatgbm_auc <- Metrics::auc(actual = onefat_preds_gbm$Actual == "yes", onefat_preds_gbm$yes)
+
+
+yardstick::roc_curve(onefat_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One Fatality GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(onefatgbm_auc, 4))
+  )
+
+# non XBoost AUC - .8564
+
+yardstick::gain_curve(onefat_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality GBM Gain Curve")
+
+plot(caret::varImp(onefat_gbm), main="Variable Importance with Gradient Boosting")
+
+##### svm #####
+
+
+# use caret "train" function to train svm
+library(kernlab)
+onefat_svm <- 
+  train(form = formreg,
+        data = colombia_conflict_train,
+        method = "svmPoly",
+       # tuneLength = 15,
+      #  tuneGrid = nnetGrid,
+        trControl = onefat_trControl,
+        metric = "ROC", # how to select among models
+        verbose = FALSE) # don't print output along the way
+
+
+onefat_svm
+# plot(caret::varImp(onefat_svm), main="Variable Importance with SVM")
+
+onefat_preds_svm <- bind_cols(
+   predict(onefat_svm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(onefat_svm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$one_fat
+)
+
+onefat_svm_auc <- Metrics::auc(actual = onefat_preds_svm$Actual == "yes", onefat_preds_svm$yes)
+
+
+yardstick::roc_curve(onefat_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One Fatality SVM ROC Curve",
+    subtitle = paste0("AUC = ", round(onefat_svm_auc, 4))
+  )
+
+
+yardstick::gain_curve(onefat_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One Fatality SVM Gain Curve")
+
+
+
+
+# make predictions
+preds_svm <-
+  predict(object = onefat_svm,
+          newdata = colombia_conflict_test)
+      
+# record model performance
+confusionmatrix_svm <-
+  confusionMatrix(data = preds_svm,
+                  reference = colombia_conflict_test$one_fat,
+                  positive = "yes")
+
+      
+# print confusion matrix
+confusionmatrix_svm
+
+#### model comp #####
+
+onefat_resamples <- caret::resamples(list(Lasso = onefat_lasso,
+                                          Random.Forest = onefat_rf,
+                                          SVM = onefat_svm,
+                                          GBM_XGBoost = onefat_gbm))
+summary(onefat_resamples)
+
+
+
+
+```
+
+
+
+```{r five_fat_modeling, warning=FALSE, echo=FALSE, message = FALSE}
+# lasso, rf, gradient boosting machines, neural networks
+
+
+apply(is.na(cc_agg_year_mun %>% dplyr::select(five_fat, nl:NBI_Proportion_2018)), 2, which)
+
+
+#### random forest ####
+
+colombia_conflict_train$five_fat <- ifelse(colombia_conflict_train$five_fat == 1, "yes", "no")
+colombia_conflict_test$five_fat <- ifelse(colombia_conflict_test$five_fat == 1, "yes", "no")
+
+colombia_conflict_train$five_fat <- as.factor(as.character(colombia_conflict_train$five_fat))
+colombia_conflict_test$five_fat <- as.factor(as.character(colombia_conflict_test$five_fat))
+
+formreg <- five_fat ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018
+
+# full model only
+fivefat_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",       # save preds for the optimal tuning parameter
+   classProbs = TRUE,  # class probs in addition to preds
+   summaryFunction = twoClassSummary
+   )
+
+fivefat_rf <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   method = "rf",
+   metric = "ROC",
+   tuneGrid = expand.grid(mtry = 1:10), # searching around mtry=4
+   trControl = fivefat_trControl
+)
+
+fivefat_rf
+
+plot(fivefat_rf)
+
+
+
+fivefat_preds_rf <- bind_cols(
+   predict(fivefat_rf, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fivefat_rf, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$five_fat
+)
+
+confmat_fivefat <- confusionMatrix(fivefat_preds_rf$Predicted, reference = colombia_conflict_test$five_fat)
+confmat_fivefat
+
+
+fivefatrf_auc <- Metrics::auc(actual = fivefat_preds_rf$Actual == "yes", fivefat_preds_rf$yes)
+
+
+yardstick::roc_curve(fivefat_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Five Fatalities RF ROC Curve",
+    subtitle = paste0("AUC = ", round(fivefatrf_auc, 4))
+  )
+
+
+yardstick::gain_curve(fivefat_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(title = "Five Fatalities RF Gain Curve")
+
+plot(caret::varImp(fivefat_rf), main="Variable Importance with Random Forest")
+
+### lasso ####
+library(elasticnet)
+X <- model.matrix(formreg, data = colombia_conflict_train)[, -1]
+Y <- as.factor(colombia_conflict_train[["five_fat"]])
+# find MSE for lambda
+cvlasso <- cv.glmnet(X, as.numeric(Y), alpha = 1)
+plot(cvlasso)
+cvlasso
+
+(best.lambda <- cvlasso$lambda.min)
+
+fivefat_lasso <- train(
+   x=X, y=Y, 
+   data = colombia_conflict_train, 
+   metric = "ROC",
+   method = 'glmnet', 
+   tuneGrid = expand.grid(alpha = 1, lambda = best.lambda),
+   trControl = fivefat_trControl
+)
+
+
+fivefat_lasso
+
+# plot(fivefat_lasso)
+
+
+
+fivefat_preds_lasso <- bind_cols(
+   predict(fivefat_lasso, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fivefat_lasso, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$five_fat
+)
+
+confmat_fivefat <- confusionMatrix(fivefat_preds_lasso$Predicted, reference = colombia_conflict_test$five_fat)
+confmat_fivefat
+
+
+fivefatlasso_auc <- Metrics::auc(actual = fivefat_preds_lasso$Actual == "yes", fivefat_preds_lasso$yes)
+
+
+yardstick::roc_curve(fivefat_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Five Fatalities Lasso ROC Curve",
+    subtitle = paste0("AUC = ", round(fivefatlasso_auc, 4))
+  )
+
+
+yardstick::gain_curve(fivefat_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(title = "Five Fatalities Lasso Gain Curve")
+
+plot(caret::varImp(fivefat_lasso), main="Variable Importance with Lasso Regression")
+
+
+
+
+
+ols.model <- glm(as.numeric(five_fat) ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018, data=colombia_conflict_train)
+
+summary(ols.model)
+
+
+
+
+
+
+
+
+##### gradient boosting model#### 
+
+set.seed(1234)
+
+
+
+fivefat_gbm <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = fivefat_trControl
+)
+
+fivefat_gbm
+
+plot(fivefat_gbm)
+
+
+fivefat_preds_gbm <- bind_cols(
+   predict(fivefat_gbm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fivefat_gbm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$five_fat
+)
+
+confmat_fivefat <- confusionMatrix(fivefat_preds_gbm$Predicted, reference = colombia_conflict_test$five_fat)
+confmat_fivefat
+
+
+fivefatgbm_auc <- Metrics::auc(actual = fivefat_preds_gbm$Actual == "yes", fivefat_preds_gbm$yes)
+
+
+yardstick::roc_curve(fivefat_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Five Fatalities GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(fivefatgbm_auc, 4))
+  )
+
+# non XBoost AUC - .8564
+
+yardstick::gain_curve(fivefat_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "Five Fatalities GBM Gain Curve")
+
+plot(caret::varImp(fivefat_gbm), main="Variable Importance with Gradient Boosting")
+
+
+##### svm #####
+
+
+# use caret "train" function to train svm
+library(kernlab)
+fivefat_svm <- 
+  train(form = formreg,
+        data = colombia_conflict_train,
+        method = "svmPoly",
+       # tuneLength = 15,
+      #  tuneGrid = nnetGrid,
+        trControl = fivefat_trControl,
+        metric = "ROC", # how to select among models
+        verbose = FALSE) # don't print output along the way
+
+
+fivefat_svm
+# plot(caret::varImp(fivefat_svm), main="Variable Importance with SVM")
+
+fivefat_preds_svm <- bind_cols(
+   predict(fivefat_svm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fivefat_svm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$five_fat
+)
+
+fivefat_svm_auc <- Metrics::auc(actual = fivefat_preds_svm$Actual == "yes", fivefat_preds_svm$yes)
+
+
+yardstick::roc_curve(fivefat_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "Five Fatalities SVM ROC Curve",
+    subtitle = paste0("AUC = ", round(fivefat_svm_auc, 4))
+  )
+
+
+yardstick::gain_curve(fivefat_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "Five Fatalities SVM Gain Curve")
+
+
+
+
+# make predictions
+preds_svm <-
+  predict(object = fivefat_svm,
+          newdata = colombia_conflict_test)
+      
+# record model performance
+confusionmatrix_svm <-
+  confusionMatrix(data = preds_svm,
+                  reference = colombia_conflict_test$five_fat,
+                  positive = "yes")
+
+      
+# print confusion matrix
+confusionmatrix_svm
+
+#### model comp #####
+
+fivefat_resamples <- caret::resamples(list(Lasso = fivefat_lasso,
+                                          Random.Forest = fivefat_rf,
+                                          SVM = fivefat_svm,
+                                          GBM_XGBoost = fivefat_gbm))
+summary(fivefat_resamples)
+
+
+
+
+
+
+```
+
+
+```{r fat_one_sd_inc_modeling, warning=FALSE, echo=FALSE, message = FALSE}
+# lasso, rf, gradient boosting machines, neural networks
+
+
+apply(is.na(cc_agg_year_mun %>% dplyr::select(fat_one_sd_inc, nl:NBI_Proportion_2018)), 2, which)
+
+
+#### random forest ####
+
+colombia_conflict_train$fat_one_sd_inc <- ifelse(colombia_conflict_train$fat_one_sd_inc == 1, "yes", "no")
+colombia_conflict_test$fat_one_sd_inc <- ifelse(colombia_conflict_test$fat_one_sd_inc == 1, "yes", "no")
+
+colombia_conflict_train$fat_one_sd_inc <- as.factor(as.character(colombia_conflict_train$fat_one_sd_inc))
+colombia_conflict_test$fat_one_sd_inc <- as.factor(as.character(colombia_conflict_test$fat_one_sd_inc))
+
+formreg <- fat_one_sd_inc ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018
+
+# full model only
+fatonesdinc_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",       # save preds for the optimal tuning parameter
+   classProbs = TRUE,  # class probs in addition to preds
+   summaryFunction = twoClassSummary
+   )
+
+fatonesdinc_rf <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   method = "rf",
+   metric = "ROC",
+   tuneGrid = expand.grid(mtry = 1:10), # searching around mtry=4
+   trControl = fatonesdinc_trControl
+)
+
+fatonesdinc_rf
+
+plot(fatonesdinc_rf)
+
+
+
+fatonesdinc_preds_rf <- bind_cols(
+   predict(fatonesdinc_rf, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fatonesdinc_rf, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$fat_one_sd_inc
+)
+
+confmat_fatonesdinc <- confusionMatrix(fatonesdinc_preds_rf$Predicted, reference = colombia_conflict_test$fat_one_sd_inc)
+confmat_fatonesdinc
+
+
+fatonesdincrf_auc <- Metrics::auc(actual = fatonesdinc_preds_rf$Actual == "yes", fatonesdinc_preds_rf$yes)
+
+
+yardstick::roc_curve(fatonesdinc_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One SD Increase in Fatalities RF ROC Curve",
+    subtitle = paste0("AUC = ", round(fatonesdincrf_auc, 4))
+  )
+
+
+yardstick::gain_curve(fatonesdinc_preds_rf, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One SD Increase in Fatalities RF Gain Curve")
+
+plot(caret::varImp(fatonesdinc_rf), main="Variable Importance with Random Forest")
+
+### lasso ####
+library(elasticnet)
+X <- model.matrix(formreg, data = colombia_conflict_train)[, -1]
+Y <- as.factor(colombia_conflict_train[["fat_one_sd_inc"]])
+# find MSE for lambda
+cvlasso <- cv.glmnet(X, as.numeric(Y), alpha = 1)
+plot(cvlasso)
+cvlasso
+
+(best.lambda <- cvlasso$lambda.min)
+
+fatonesdinc_lasso <- train(
+   x=X, y=Y, 
+   data = colombia_conflict_train, 
+   metric = "ROC",
+   method = 'glmnet', 
+   tuneGrid = expand.grid(alpha = 1, lambda = best.lambda),
+   trControl = fatonesdinc_trControl
+)
+
+
+fatonesdinc_lasso
+
+# plot(fatonesdinc_lasso)
+
+
+
+fatonesdinc_preds_lasso <- bind_cols(
+   predict(fatonesdinc_lasso, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fatonesdinc_lasso, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$fat_one_sd_inc
+)
+
+confmat_fatonesdinc <- confusionMatrix(fatonesdinc_preds_lasso$Predicted, reference = colombia_conflict_test$fat_one_sd_inc)
+confmat_fatonesdinc
+
+
+fatonesdinclasso_auc <- Metrics::auc(actual = fatonesdinc_preds_lasso$Actual == "yes", fatonesdinc_preds_lasso$yes)
+
+
+yardstick::roc_curve(fatonesdinc_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One SD Increase in Fatalities Lasso ROC Curve",
+    subtitle = paste0("AUC = ", round(fatonesdinclasso_auc, 4))
+  )
+
+
+yardstick::gain_curve(fatonesdinc_preds_lasso, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One SD Increase in Fatalities Lasso Gain Curve")
+
+plot(caret::varImp(fatonesdinc_lasso), main="Variable Importance with Lasso Regression")
+
+
+
+
+
+ols.model <- glm(as.numeric(fat_one_sd_inc) ~ nl + ndvi + r_tri + dist + nat_des + etn_grp_pct + div_index + voto_dc_pres_pv + voto_ch_pres_pv + prob_ratio_index + pob_dens_2018 + pib_pc_2020 + balance_primario + dependencia_transferencia + ahorro_corriente + educ_level_yngml + nitrab_niestud + pct_est_1 + Ven_Migrants_per_mil_inh_2019 + NBI_Proportion_2018, data=colombia_conflict_train)
+
+summary(ols.model)
+
+
+
+
+
+
+
+
+##### gradient boosting model#### 
+
+set.seed(1234)
+
+
+
+fatonesdinc_gbm <- train(
+   formreg, 
+   data = colombia_conflict_train, 
+   # method = "gbm",
+   metric = "ROC",
+   method = "xgbTree",
+   tuneLength = 5,
+   trControl = fatonesdinc_trControl
+)
+
+fatonesdinc_gbm
+
+plot(fatonesdinc_gbm)
+
+
+fatonesdinc_preds_gbm <- bind_cols(
+   predict(fatonesdinc_gbm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fatonesdinc_gbm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$fat_one_sd_inc
+)
+
+confmat_fatonesdinc <- confusionMatrix(fatonesdinc_preds_gbm$Predicted, reference = colombia_conflict_test$fat_one_sd_inc)
+confmat_fatonesdinc
+
+
+fatonesdincgbm_auc <- Metrics::auc(actual = fatonesdinc_preds_gbm$Actual == "yes", fatonesdinc_preds_gbm$yes)
+
+
+yardstick::roc_curve(fatonesdinc_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One SD Increase in Fatalities GBM ROC Curve",
+    subtitle = paste0("AUC = ", round(fatonesdincgbm_auc, 4))
+  )
+
+# non XBoost AUC - .8564
+
+yardstick::gain_curve(fatonesdinc_preds_gbm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One SD Increase in Fatalities GBM Gain Curve")
+
+plot(caret::varImp(fatonesdinc_gbm), main="Variable Importance with Gradient Boosting")
+
+##### svm #####
+
+
+# use caret "train" function to train svm
+library(kernlab)
+fatonesdinc_svm <- 
+  train(form = formreg,
+        data = colombia_conflict_train,
+        method = "svmPoly",
+       # tuneLength = 15,
+      #  tuneGrid = nnetGrid,
+        trControl = fatonesdinc_trControl,
+        metric = "ROC", # how to select among models
+        verbose = FALSE) # don't print output along the way
+
+
+fatonesdinc_svm
+# plot(caret::varImp(fatonesdinc_svm), main="Variable Importance with SVM")
+
+fatonesdinc_preds_svm <- bind_cols(
+   predict(fatonesdinc_svm, newdata = colombia_conflict_test, type = "prob"),
+   Predicted = predict(fatonesdinc_svm, newdata = colombia_conflict_test, type = "raw"),
+   Actual = colombia_conflict_test$fat_one_sd_inc
+)
+
+fatonesdinc_svm_auc <- Metrics::auc(actual = fatonesdinc_preds_svm$Actual == "yes", fatonesdinc_preds_svm$yes)
+
+
+yardstick::roc_curve(fatonesdinc_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(
+    title = "One SD Increase in Fatalities SVM ROC Curve",
+    subtitle = paste0("AUC = ", round(fatonesdinc_svm_auc, 4))
+  )
+
+
+yardstick::gain_curve(fatonesdinc_preds_svm, Actual, yes) %>%
+  autoplot() +
+  labs(title = "One SD Increase in Fatalities SVM Gain Curve")
+
+
+
+
+# make predictions
+preds_svm <-
+  predict(object = fatonesdinc_svm,
+          newdata = colombia_conflict_test)
+      
+# record model performance
+confusionmatrix_svm <-
+  confusionMatrix(data = preds_svm,
+                  reference = colombia_conflict_test$fat_one_sd_inc,
+                  positive = "yes")
+
+      
+# print confusion matrix
+confusionmatrix_svm
+
+#### model comp #####
+
+fatonesdinc_resamples <- caret::resamples(list(Lasso = fatonesdinc_lasso,
+                                          Random.Forest = fatonesdinc_rf,
+                                          SVM = fatonesdinc_svm,
+                                          GBM_GBoost = fatonesdinc_gbm))
+summary(fatonesdinc_resamples)
+
+
+
+
+```
+
+
+```{r final_viz_outputs, warning=FALSE, echo=FALSE, message = FALSE}
+
+onefat_preds_gbm
+fivefat_preds_gbm
+
+
+nrow(col_adm2)
+
+colombia_conflict_test$anyconf_prob <- onefat_preds_gbm$yes
+colombia_conflict_test$anyconf_bin <- onefat_preds_gbm$Predicted
+
+colombia_conflict_test$highconf_prob <- fivefat_preds_gbm$yes
+colombia_conflict_test$highconf_bin <- fivefat_preds_gbm$Predicted
+
+colombia_conflict_test$incconf_prob <- fatonesdinc_preds_gbm$yes
+colombia_conflict_test$incconf_bin <- fatonesdinc_preds_gbm$Predicted
+
+cc_predictions <- colombia_conflict_test %>% dplyr::select(div_code2, anyconf_prob:incconf_bin)
+
+cc_predictions <- cc_predictions %>%
+  dplyr::left_join(col_pred_covars %>% dplyr::select(div_code2, mun_name, dept_name))
+
+library(kable)
+
+head(mtcars) %>%
+  gt() %>% 
+  gt_theme_538()
+           
+write_csv(cc_predictions, "cc_predictions.csv")
+
+
+
+
+
+library(ggplot2)
+library(ggmap)
+library(sf)
+
+bounding <- sf::st_bbox(col_pred_covars)  # get the bounding box of the data - we'll use this to get the basemap
+names(bounding) <- c("left","bottom","right","top") 
+
+map <- get_map(location = bounding, zoom = 6)
+
+ggmap(map) + 
+  geom_sf(data = col_pred_covars, aes(fill = anyconf_prob), inherit.aes = FALSE) +
+  ggthemes::theme_fivethirtyeight() +
+  guides(fill = guide_legend(title = "Probability of Any Conflict"))
+
+
+
+vars <- varImp(onefat_gbm, scale = T)
+
+vars <- vars$importance  
+
+vars <- vars %>% rownames_to_column()
+
+vars$Variable <- c("Ethnic Diversity", "Presidential Vote - Left", "Venezuelan Migrants per 1K",
+                   "Ni-Ni Rate", "Distance to City", "Natural Disasters", "Vegetation",
+                   "Minority Presence", "Education Levels Young Males", "Presidential Vote - Right",
+                   "Fiscal Transfer Dependence", "GDP per Capita", "Terrain Ruggedness", "Current Account Balance", "Population Density", "Primary Account Balance", "Poverty Rate", "Nightlights", "Estrato 1",
+                   "Electoral Probability Ratio Index")
+
+
+write_csv(vars, "variable_importance.csv")
+
+ccp <- col_pred_covars %>% dplyr::left_join(cc_predictions)
+
+ccpmap <- as(ccp, "Spatial")
+
+ccpmap <- fortify(ccpmap, region = "div_code2")
+
+ccpmap <- ccpmap %>% dplyr::left_join(ccp, by = c("id" = "div_code2"))
+
+pretty_breaks <- c(.20,.40,.60,.80)
+
+# find the extremes
+minVal <- min(ccpmap$incconf_prob, na.rm = T)  
+maxVal <- max(ccpmap$incconf_prob, na.rm = T)  
+# compute labels
+labels <- c()  
+brks <- c(minVal, pretty_breaks, maxVal)  
+# round the labels (actually, only the extremes)
+for(idx in 1:length(brks)){  
+  labels <- c(labels,round(brks[idx + 1], 2))
+}
+
+labels <- labels[1:length(labels)-1]  
+# define a new variable on the data with the breaks
+ccpmap$brks <- cut(ccpmap$incconf_prob,  
+                          breaks = brks, 
+                          include.lowest = TRUE, 
+                          labels = labels)
+
+brks_scale <- levels(ccpmap$brks)  
+labels_scale <- rev(brks_scale)
+
+
+theme_map <- function(...) {  
+  theme_minimal() +
+    theme(
+      text = element_text(family = "Ubuntu Regular", color = "#22211d"),
+      axis.line = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      # panel.grid.minor = element_line(color = "#ebebe5", size = 0.2),
+      panel.grid.major = element_line(color = "#ebebe5", size = 0.2),
+      panel.grid.minor = element_blank(),
+      plot.background = element_rect(fill = "#f5f5f2", color = NA), 
+      panel.background = element_rect(fill = "#f5f5f2", color = NA), 
+      legend.background = element_rect(fill = "#f5f5f2", color = NA),
+      panel.border = element_blank(),
+      ...
+    )
+}
+
+#crazy function just to extend the legend extremes
+extendLegendWithExtremes <- function(p){  
+  p_grob <- ggplotGrob(p)
+  legend <- gtable_filter(p_grob, "guide-box")
+  legend_grobs <- legend$grobs[[1]]$grobs[[1]]
+  # grab the first key of legend
+  legend_first_key <- gtable_filter(legend_grobs, "key-3-1-1")
+  legend_first_key$widths <- unit(2, units = "cm")
+  # modify its width and x properties to make it longer
+  legend_first_key$grobs[[1]]$width <- unit(2, units = "cm")
+  legend_first_key$grobs[[1]]$x <- unit(0.15, units = "cm")
+
+  # last key of legend
+  legend_last_key <- gtable_filter(legend_grobs, "key-3-6-1")
+  legend_last_key$widths <- unit(2, units = "cm")
+  # analogous
+  legend_last_key$grobs[[1]]$width <- unit(2, units = "cm")
+  legend_last_key$grobs[[1]]$x <- unit(1.02, units = "cm")
+
+  # grab the last label so we can also shift its position
+  legend_last_label <- gtable_filter(legend_grobs, "label-5-6")
+  legend_last_label$grobs[[1]]$x <- unit(2, units = "cm")
+
+  # Insert new color legend back into the combined legend
+  legend_grobs$grobs[legend_grobs$layout$name == "key-3-1-1"][[1]] <- 
+    legend_first_key$grobs[[1]]
+  legend_grobs$grobs[legend_grobs$layout$name == "key-3-6-1"][[1]] <- 
+    legend_last_key$grobs[[1]]
+  legend_grobs$grobs[legend_grobs$layout$name == "label-5-6"][[1]] <- 
+    legend_last_label$grobs[[1]]
+
+  # finally, I need to create a new label for the minimum value 
+  new_first_label <- legend_last_label$grobs[[1]]
+  new_first_label$label <- round(min(ccpmap$anyconf_prob, na.rm = T), 2)
+  new_first_label$x <- unit(-0.15, units = "cm")
+  new_first_label$hjust <- 1
+
+  legend_grobs <- gtable_add_grob(legend_grobs, 
+                                  new_first_label, 
+                                  t = 6, 
+                                  l = 2, 
+                                  name = "label-5-0", 
+                                  clip = "off")
+  legend$grobs[[1]]$grobs[1][[1]] <- legend_grobs
+  p_grob$grobs[p_grob$layout$name == "guide-box"][[1]] <- legend
+
+  # the plot is now drawn using this grid function
+  grid.newpage()
+  grid.draw(p_grob)
+}
+
+
+p <- ggplot() +  
+  geom_polygon(data = ccpmap, aes(fill = brks, 
+                                         x = long, 
+                                         y = lat, 
+                                         group = group)) +
+  # municipality outline
+  geom_path(data = ccpmap, aes(x = long, 
+                                      y = lat, 
+                                      group = group), 
+            color = "white", size = 0.1) +
+  coord_equal() +
+  theme_map() +
+  theme(
+    legend.position = c(0.7, 0.03),
+    legend.text.align = 0,
+#    legend.background = element_rect(fill = alpha("white")),
+    legend.text = element_text(size = 10, hjust = 0, color = "#4e4d47"),
+    legend.title = element_text(size = 16),
+    plot.title = element_text(size = 24, hjust = 0.8, color = "#4e4d47"),
+    plot.subtitle = element_text(size = 18, hjust = 0.8, face = "italic", color = "#4e4d47"),
+    plot.caption = element_text(size = 10, hjust = 0.95, color = "#4e4d47"),
+    plot.margin = unit(c(.5,.5,.2,.5), "cm"),
+    panel.border = element_blank()
+  ) +
+  labs(x = NULL, 
+       y = NULL, 
+       title = "Probability of Increased Conflict\nin the Next Year", 
+       subtitle = "Colombian Municipalities, 2022", 
+       caption = "CDA") + 
+  scale_fill_manual(
+    values = magma(8, alpha = 0.8)[2:7],
+    breaks = rev(brks_scale),
+    name = "Probability",
+    drop = FALSE,
+    labels = labels_scale,
+    guide = guide_legend(
+      direction = "horizontal",
+      keyheight = unit(2, units = "mm"),
+      keywidth = unit(70/length(labels), units = "mm"),
+      title.position = 'top',
+      title.hjust = 0.5,
+      label.hjust = 1,
+      nrow = 1,
+      byrow = T,
+      reverse = T,
+      label.position = "bottom"
+    )
+  )
+
+p
+
+extendLegendWithExtremes(p)  
+
+library(ggalt)
+ggplot(data = vars, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_lollipop() +
+  coord_flip() +
+  ggthemes::theme_fivethirtyeight() +
+  labs(title = "Variable Importance", 
+       subtitle = "Predictors of Conflict", 
+       caption = "CDA")
+
+
+
+tsmod <- stlm(cc_agg_monthly$fatalities, modelfunction = auto.arima)
+
+
+autoplot(forecast(cc_agg_monthly, h = 12))
+
+
+```
